@@ -1,10 +1,9 @@
 #! /usr/bin/python3
 
-import argparse
 import threading
-from argparse import ArgumentParser, Namespace
 
 from queue import Queue
+from argparse import ArgumentParser, Namespace
 from socket import AF_INET, SOCK_STREAM, gethostbyname, socket
 
 
@@ -14,17 +13,20 @@ class PortScanner:
         self.set_parser()
 
     def set_parser(self) -> None:
-        parser: ArgumentParser = argparse.ArgumentParser(description='TCP Port Scanner')
+        parser: ArgumentParser = ArgumentParser(description='TCP Port Scanner')
         parser.add_argument('host', help='Host to scan')
         parser.add_argument('ports', help='Port range to scan, formatted as start-end')
         args: Namespace = parser.parse_args()
-        start_port, end_port = map(int, args.ports.split('-'))
+        if args.ports == '-':
+            start_port, end_port = 1, 65535
+        else:
+            start_port, end_port = map(int, args.ports.split('-'))
         self.main(args.host, start_port, end_port)
 
     @staticmethod
     def tcp_test(port: int, target_ip: str) -> None:
         with socket(AF_INET, SOCK_STREAM) as sock:
-            sock.settimeout(1)
+            sock.settimeout(0.1)
             result: int = sock.connect_ex((target_ip, port))
             if result == 0:
                 print(f"Opened Port: {port}")
@@ -48,4 +50,4 @@ class PortScanner:
 
 
 if __name__ == '__main__':
-   PortScanner()
+    PortScanner()

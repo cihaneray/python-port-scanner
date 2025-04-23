@@ -1,16 +1,19 @@
 # Advanced TCP Port Scanner
 
-A fast, multithreaded TCP port scanner written in Python that allows you to scan for open ports on target hosts.
+A fast, multithreaded TCP port scanner written in Python that allows you to scan for open ports on target hosts, supporting individual hosts, IP addresses, and CIDR notation.
 
 ## Features
 
-- Scan single ports or port ranges
+- Scan individual hosts, IPs, or entire subnets using CIDR notation
+- Scan single ports, port ranges, or all ports
 - Multithreaded scanning for improved performance
 - Service identification for common ports
-- Progress reporting during scanning
+- Banner grabbing to identify services running on open ports
+- Progress reporting with estimated time remaining
 - Result saving to output files
 - Configurable timeout settings
 - Verbose and quiet modes for different output levels
+- Customizable port service definitions via external configuration
 
 ## Requirements
 
@@ -28,12 +31,12 @@ chmod +x port_scanner.py
 ## Usage
 
 ```
-./port_scanner.py [-h] [-t THREADS] [-T TIMEOUT] [-o OUTPUT] [-v] [-q] host ports
+./port_scanner.py [-h] [-t THREADS] [-T TIMEOUT] [-o OUTPUT] [-v] [-q] [-b] [--config CONFIG] hosts ports
 ```
 
 ### Arguments
 
-- `host`: Target host to scan (hostname or IP address)
+- `hosts`: Target host(s) to scan (hostname, IP address, or CIDR notation)
 - `ports`: Port range to scan (formatted as start-end or a single port)
   - Use `-` to scan all ports (1-65535)
 
@@ -45,6 +48,8 @@ chmod +x port_scanner.py
 - `-o, --output OUTPUT`: Output file for results
 - `-v, --verbose`: Verbose output
 - `-q, --quiet`: Suppress all output except results
+- `-b, --banner`: Attempt to grab banners from open ports
+- `--config CONFIG`: Path to custom port configuration file
 
 ## Examples
 
@@ -63,6 +68,16 @@ Scan all ports with 100 threads:
 ./port_scanner.py scanme.nmap.org - -t 100
 ```
 
+Scan an entire subnet:
+```bash
+./port_scanner.py 192.168.1.0/24 22
+```
+
+Scan with banner grabbing:
+```bash
+./port_scanner.py 10.0.0.1 20-30 -b
+```
+
 Scan with a custom timeout and save results:
 ```bash
 ./port_scanner.py localhost 1-1000 -T 1.0 -o results.txt
@@ -76,17 +91,20 @@ Run a quiet scan:
 ## Output Example
 
 ```
-Starting port scan on host example.com (93.184.216.34)
+Starting port scan on 1 host(s)
+ - example.com (93.184.216.34)
 Port range: 80-443
 Number of threads: 50
 Timeout: 0.5 seconds
 
-Progress: 364/364 ports scanned (100.0%) - Elapsed time: 5.2s
+Progress: 364/364 ports scanned (100.0%) - Elapsed: 5.2s - ETA: 0.0s
 
 Scan completed in 5.23 seconds
-Target: example.com (93.184.216.34)
-Open ports: 2/364
+Scanned 1 hosts and 364 total ports
+Total open ports found: 2
 
+Target: 93.184.216.34
+Open ports: 2
 PORT     SERVICE
 -----------------
 80       HTTP
@@ -95,16 +113,44 @@ PORT     SERVICE
 Results saved to scan_results.txt
 ```
 
+With banner grabbing enabled:
+```
+Target: 93.184.216.34
+Open ports: 2
+PORT     SERVICE        BANNER
+-----------------------------------------------
+80       HTTP           HTTP/1.1 301 Moved Permanently
+443      HTTPS          HTTP/1.1 200 OK
+```
+
+## Port Configuration
+
+The scanner can use a custom port configuration file in JSON format:
+
+```json
+{
+  "common_ports": {
+    "20": "FTP-DATA",
+    "21": "FTP",
+    "22": "SSH",
+    "80": "HTTP",
+    "443": "HTTPS"
+  }
+}
+```
+
+Place this file in the same directory as the script or specify a custom path with the `--config` option.
+
 ## Performance Notes
 
 - Increasing the number of threads can improve scanning speed but may impact system performance
 - Decreasing the timeout value can speed up scans but may increase the chance of missing slower responding ports
-- Scanning large port ranges can take significant time, especially with higher timeout values
+- Scanning large port ranges or subnets can take significant time, especially with higher timeout values
 
 ## Limitations
 
 - Only performs TCP connect scans (no UDP, SYN scanning, etc.)
-- Limited service identification (only identifies common services)
+- Banner grabbing may not work with all services
 - No OS fingerprinting capabilities
 
 ## Legal Disclaimer

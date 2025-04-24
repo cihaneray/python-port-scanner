@@ -387,6 +387,7 @@ class PortScanner:
                     if self.args.banner:
                         banner = self.grab_banner(target, port) if not self.args.syn else self.grab_banner(target, port)
                         banner_display = banner[:50] + "..." if len(banner) > 50 else banner
+                        banner_display = banner_display.replace('\r', '').split('\n')
                         print(f"{port:<8} {service:<12} {banner_display}")
                     else:
                         print(f"{port:<8} {service}")

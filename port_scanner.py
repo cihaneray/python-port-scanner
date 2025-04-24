@@ -1,16 +1,25 @@
 #!/usr/bin/python3
 
-import os
-import sys
-import time
-import json
-import socket
-import threading
 import ipaddress
+import json
+import os
+import random
+import socket
+import sys
+import threading
+import time
 
-from typing import List, Dict
-from queue import Queue, Empty
 from argparse import ArgumentParser, Namespace
+from queue import Queue, Empty
+from typing import List, Dict
+
+try:
+    # Try to import scapy for SYN scanning
+    from scapy.all import sr1, IP, TCP, conf
+
+    SCAPY_AVAILABLE = True
+except ImportError:
+    SCAPY_AVAILABLE = False
 
 
 class PortScanner:
@@ -33,6 +42,17 @@ class PortScanner:
             print("Error: Timeout must be greater than 0")
             sys.exit(1)
 
+        # Check if SYN scan requires root/admin
+        if self.args.syn and not self._is_root():
+            print("Error: SYN scanning requires root/administrator privileges")
+            sys.exit(1)
+
+        # Check if scapy is available for SYN scanning
+        if self.args.syn and not SCAPY_AVAILABLE:
+            print("Error: SYN scanning requires the 'scapy' library")
+            print("Please install it using: pip install scapy")
+            sys.exit(1)
+
         # Load common ports from config file
         self.common_ports = self.load_port_config()
 
@@ -49,9 +69,22 @@ class PortScanner:
         parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
         parser.add_argument('-q', '--quiet', action='store_true', help='Suppress all output except results')
         parser.add_argument('-b', '--banner', action='store_true', help='Attempt to grab banners from open ports')
+        parser.add_argument('-s', '--syn', action='store_true', help='Use SYN scanning (requires root/admin)')
         parser.add_argument('--config', help='Path to custom port configuration file')
 
         return parser.parse_args()
+
+    @staticmethod
+    def _is_root() -> bool:
+        """Check if the script is running with root/admin privileges."""
+        if os.name == 'nt':  # Windows
+            try:
+                import ctypes
+                return ctypes.windll.shell32.IsUserAnAdmin() != 0
+            except:
+                return False
+        else:  # Unix/Linux/Mac
+            return os.geteuid() == 0
 
     def load_port_config(self) -> Dict[int, str]:
         """Load port configuration from file or use default."""
@@ -124,19 +157,25 @@ class PortScanner:
         # Parse port range
         if self.args.ports == '-':
             start_port, end_port = 1, 65535
-        else:
-            try:
-                if '-' in self.args.ports:
-                    start_port, end_port = map(int, self.args.ports.split('-'))
-                else:
-                    start_port = end_port = int(self.args.ports)
+            return
+        try:
+            if '-' in self.args.ports:
+                start_port, end_port = map(int, self.args.ports.split('-'))
+            elif ',' in self.args.ports:
+                # Handle comma-separated port list
+                ports = [int(p) for p in self.args.ports.split(',')]
+                start_port, end_port = min(ports), max(ports)
+                # Use only the specified ports
+                port_list = ports
+            else:
+                start_port = end_port = int(self.args.ports)
 
-                if not 1 <= start_port <= 65535 or not 1 <= end_port <= 65535:
-                    print("Error: Port numbers must be between 1 and 65535")
-                    sys.exit(1)
-            except ValueError:
-                print("Error: Invalid port range format. Use start-end or a single port number.")
+            if not 1 <= start_port <= 65535 or not 1 <= end_port <= 65535:
+                print("Error: Port numbers must be between 1 and 65535")
                 sys.exit(1)
+        except ValueError:
+            print("Error: Invalid port format. Use start-end, comma-separated list, or a single port number.")
+            sys.exit(1)
 
         # Resolve targets
         targets = self.resolve_targets(self.args.hosts)
@@ -146,7 +185,8 @@ class PortScanner:
             sys.exit(1)
 
         # Initialize scan variables
-        self.total_ports = (end_port - start_port + 1) * len(targets)
+        port_list = port_list if 'port_list' in locals() else range(start_port, end_port + 1)
+        self.total_ports = len(port_list) * len(targets)
         self.scanned_ports = 0
         self.start_time = time.time()
 
@@ -156,7 +196,8 @@ class PortScanner:
 
         # Print scan information
         if not self.args.quiet:
-            print(f"\nStarting port scan on {len(targets)} host(s)")
+            scan_type = "SYN" if self.args.syn else "TCP Connect"
+            print(f"\nStarting {scan_type} port scan on {len(targets)} host(s)")
             if len(targets) <= 5:  # Only show all targets if 5 or fewer
                 for target in targets:
                     print(f" - {target}")
@@ -164,13 +205,18 @@ class PortScanner:
                 print(f" - {targets[0]}")
                 print(f" - {targets[1]}")
                 print(f" - ... and {len(targets) - 2} more")
-            print(f"Port range: {start_port}-{end_port}")
+
+            if ',' in self.args.ports:
+                print(f"Ports: {self.args.ports}")
+            else:
+                print(f"Port range: {start_port}-{end_port}")
+
             print(f"Number of threads: {self.args.threads}")
             print(f"Timeout: {self.args.timeout} seconds\n")
 
         # Fill the queue with (target, port) tuples to scan
         for target in targets:
-            for port in range(start_port, end_port + 1):
+            for port in port_list:
                 self.queue.put((target, port))
 
         # Start worker threads
@@ -195,8 +241,8 @@ class PortScanner:
         if self.args.output:
             self.save_results(targets)
 
-    def tcp_test(self, target_ip: str, port: int) -> bool:
-        """Test if a port is open."""
+    def tcp_connect_scan(self, target_ip: str, port: int) -> bool:
+        """Test if a port is open using TCP connect scan."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(self.args.timeout)
             result = sock.connect_ex((target_ip, port))
@@ -204,6 +250,37 @@ class PortScanner:
                 with self.lock:
                     self.open_ports[target_ip].append(port)
                 return True
+        return False
+
+    def syn_scan(self, target_ip: str, port: int) -> bool:
+        """Test if a port is open using SYN scan."""
+        if not SCAPY_AVAILABLE:
+            return False
+
+        # Disable scapy warnings
+        conf.verb = 0
+
+        # Send SYN packet
+        src_port = random.randint(1025, 65534)
+        packet = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="S")
+
+        # Set timeout and send packet
+        response = sr1(packet, timeout=self.args.timeout, verbose=0)
+
+        # Check response
+        if response and response.haslayer(TCP):
+            tcp_layer = response.getlayer(TCP)
+
+            # Check if SYN-ACK (flags=0x12) was received
+            if tcp_layer.flags == 0x12:  # SYN-ACK
+                # Send RST to close connection
+                rst = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="R")
+                sr1(rst, timeout=1, verbose=0)
+
+                with self.lock:
+                    self.open_ports[target_ip].append(port)
+                return True
+
         return False
 
     def grab_banner(self, ip: str, port: int) -> str:
@@ -234,9 +311,14 @@ class PortScanner:
                 break
 
             try:
-                is_open = self.tcp_test(target_ip, port)
+                # Choose scan method based on args
+                if self.args.syn:
+                    is_open = self.syn_scan(target_ip, port)
+                else:
+                    is_open = self.tcp_connect_scan(target_ip, port)
 
                 # If port is open and banner grabbing is enabled, try to grab banner
+                # For SYN scan, we need to establish a new connection for banner grabbing
                 if is_open and self.args.banner:
                     banner = self.grab_banner(target_ip, port)
                     if banner and self.args.verbose:
@@ -283,8 +365,10 @@ class PortScanner:
         """Display scan results."""
         elapsed = time.time() - self.start_time
         total_open = sum(len(ports) for ports in self.open_ports.values())
+        scan_type = "SYN" if self.args.syn else "TCP Connect"
 
         print(f"\nScan completed in {elapsed:.2f} seconds")
+        print(f"Scan type: {scan_type}")
         print(f"Scanned {len(targets)} hosts and {self.total_ports} total ports")
         print(f"Total open ports found: {total_open}\n")
 
@@ -301,7 +385,7 @@ class PortScanner:
                 for port in open_ports:
                     service = self.get_service_name(port)
                     if self.args.banner:
-                        banner = self.grab_banner(target, port)
+                        banner = self.grab_banner(target, port) if not self.args.syn else self.grab_banner(target, port)
                         banner_display = banner[:50] + "..." if len(banner) > 50 else banner
                         print(f"{port:<8} {service:<12} {banner_display}")
                     else:
@@ -315,7 +399,8 @@ class PortScanner:
         """Save scan results to a file."""
         try:
             with open(self.args.output, 'w') as f:
-                f.write(f"Port scan results\n")
+                scan_type = "SYN" if self.args.syn else "TCP Connect"
+                f.write(f"Port scan results ({scan_type} scan)\n")
                 f.write(f"Scan date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"Scanned {len(targets)} hosts and {self.total_ports} total ports\n")
                 total_open = sum(len(ports) for ports in self.open_ports.values())

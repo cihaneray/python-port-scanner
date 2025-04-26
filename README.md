@@ -186,5 +186,6 @@ This project is open-source software. Feel free to use, modify, and distribute a
 
 ## Todos
 
+- [X] ~~Banner Grabbing~~
 - [X] ~~SYN Scanning~~
 - [ ] UDP Scanning

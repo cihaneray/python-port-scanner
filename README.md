@@ -185,3 +185,6 @@ This tool is provided for educational and legitimate network administration purp
 This project is open-source software. Feel free to use, modify, and distribute as needed.
 
 ## Todos
+
+- [X] ~~SYN Scanning~~
+- [ ] UDP Scanning

@@ -70,7 +70,8 @@ class PortScanner:
         parser.add_argument('-q', '--quiet', action='store_true', help='Suppress all output except results')
         parser.add_argument('-b', '--banner', action='store_true', help='Attempt to grab banners from open ports')
         parser.add_argument('-s', '--syn', action='store_true', help='Use SYN scanning (requires root/admin)')
-        parser.add_argument('--config', help='Path to custom port configuration file')
+        parser.add_argument('-j', '--json', action='store_true', help='Output results in JSON format')
+        parser.add_argument('-c', '--config', help='Path to custom port configuration file')
 
         return parser.parse_args()
 
@@ -398,6 +399,10 @@ class PortScanner:
 
     def save_results(self, targets: List[str]) -> None:
         """Save scan results to a file."""
+        # Save results as a json type if requested
+        if self.args.json:
+            self.save_json_results(targets)
+            return
         try:
             with open(self.args.output, 'w') as f:
                 scan_type = "SYN" if self.args.syn else "TCP Connect"
@@ -432,6 +437,58 @@ class PortScanner:
             print(f"\nResults saved to {self.args.output}")
         except IOError as e:
             print(f"Error saving results: {e}")
+
+    def save_json_results(self, targets: List[str]) -> None:
+        """Save scan results to a JSON file."""
+        try:
+            results = {
+                "scan_info": {
+                    "scan_type": "SYN" if self.args.syn else "TCP Connect",
+                    "scan_date": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "hosts_scanned": len(targets),
+                    "ports_scanned": self.total_ports,
+                    "total_open": sum(len(ports) for ports in self.open_ports.values())
+                },
+                "targets": {
+
+                }
+            }
+
+            for target in targets:
+                open_ports = self.open_ports[target]
+                open_ports.sort()
+
+                target_data = {
+                    "ip": target,
+                    "open_ports": []
+                }
+
+                for port in open_ports:
+                    service = self.get_service_name(port)
+                    port_data = {
+                        "port": port,
+                        "service": service
+                    }
+
+                    if self.args.banner:
+                        banner = self.grab_banner(target, port)
+                        port_data["banner"] = banner
+
+                    target_data["open_ports"].append(port_data)
+
+                results["targets"][target] = target_data
+
+            # Determine output filename
+            json_file = self.args.output
+            if not json_file.endswith('.json'):
+                json_file += '.json'
+
+            with open(json_file, 'w') as f:
+                json.dump(results, f, indent=2)
+
+            print(f"\nJSON results saved to {json_file}")
+        except IOError as e:
+            print(f"Error saving JSON results: {e}")
 
 
 if __name__ == '__main__':

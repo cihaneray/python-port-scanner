@@ -1,0 +1,12 @@
+Port scan results (TCP Connect scan)
+Scan date: 2025-04-27 14:27:59
+Scanned 1 hosts and 422 total ports
+Total open ports found: 2
+
+Target: 45.33.32.156
+Open ports: 2
+PORT     SERVICE
+--------------------
+22       SSH
+80       HTTP
+

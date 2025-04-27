@@ -242,10 +242,6 @@ class PortScanner:
         if self.args.output:
             self.save_results(targets)
 
-        # Save results as a json type if requested
-        if self.args.json:
-            self.save_json_results(targets)
-
     def tcp_connect_scan(self, target_ip: str, port: int) -> bool:
         """Test if a port is open using TCP connect scan."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -403,6 +399,10 @@ class PortScanner:
 
     def save_results(self, targets: List[str]) -> None:
         """Save scan results to a file."""
+        # Save results as a json type if requested
+        if self.args.json:
+            self.save_json_results(targets)
+            return
         try:
             with open(self.args.output, 'w') as f:
                 scan_type = "SYN" if self.args.syn else "TCP Connect"

@@ -158,7 +158,6 @@ class PortScanner:
         # Parse port range
         if self.args.ports == '-':
             start_port, end_port = 1, 65535
-            return
         try:
             if '-' in self.args.ports:
                 start_port, end_port = map(int, self.args.ports.split('-'))

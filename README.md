@@ -190,3 +190,5 @@ This project is open-source software. Feel free to use, modify, and distribute a
 - [X] ~~SYN Scanning~~
 - [X] ~~Saving in JSON Format~~
 - [ ] UDP Scanning
+- [ ] Service Version Detection
+- [ ] Vulnerability Checking

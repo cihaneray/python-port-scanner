@@ -105,7 +105,7 @@ class PortScanner:
         if self.args.config:
             config_path = self.args.config
         else:
-            config_path = os.path.join(os.path.dirname(__file__), 'port_config.json')
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'port_config.json')
 
         try:
             if os.path.exists(config_path):
@@ -165,12 +165,22 @@ class PortScanner:
             return self.parse_cidr(host_input)
 
         # Otherwise, treat as single hostname/IP
+        if self.is_ip(host_input):
+            return [host_input]
+        else:
+            try:
+                ip = socket.gethostbyname(host_input)
+                return [ip]
+            except socket.gaierror:
+                print(f"Error: Could not resolve hostname {host_input}")
+                sys.exit(1)
+
+    def is_ip(self, s: str) -> bool:
         try:
-            ip = socket.gethostbyname(host_input)
-            return [ip]
-        except socket.gaierror:
-            print(f"Error: Could not resolve hostname {host_input}")
-            sys.exit(1)
+            ipaddress.ip_address(s)
+            return True
+        except ValueError:
+            return False
 
     def scan(self) -> None:
         # Parse port range

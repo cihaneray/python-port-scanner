@@ -175,7 +175,8 @@ class PortScanner:
                 print(f"Error: Could not resolve hostname {host_input}")
                 sys.exit(1)
 
-    def is_ip(self, s: str) -> bool:
+    @staticmethod
+    def is_ip(s: str) -> bool:
         try:
             ipaddress.ip_address(s)
             return True

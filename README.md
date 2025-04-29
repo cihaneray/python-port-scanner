@@ -189,7 +189,7 @@ This project is open-source software. Feel free to use, modify, and distribute a
 - [X] ~~Banner Grabbing~~
 - [X] ~~SYN Scanning~~
 - [X] ~~Saving in JSON Format~~
-- [ ] UDP Scanning
+- [X] ~~UDP Scanning~~
 - [ ] Service Version Detection
 - [ ] Vulnerability Checking
 - [ ] Update Readme

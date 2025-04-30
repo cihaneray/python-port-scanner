@@ -191,5 +191,7 @@ This project is open-source software. Feel free to use, modify, and distribute a
 - [X] ~~Saving in JSON Format~~
 - [X] ~~UDP Scanning~~
 - [ ] Service Version Detection
+- [ ] Increase Reliability
 - [ ] Vulnerability Checking
 - [ ] Update Readme
+- [ ] Fix Bugs

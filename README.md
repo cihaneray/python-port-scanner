@@ -1,4 +1,4 @@
-# Advanced TCP Port Scanner
+# Advanced Port Scanner
 [![License: MIT](https://img.shields.io/badge/License-MIT-cyan.svg)](https://opensource.org/licenses/MIT)
 [![Python: 3.6+](https://img.shields.io/badge/Python-3.6+-blueviolet.svg)](https://www.python.org/downloads/)
 [![Maintenance: Active](https://img.shields.io/badge/Maintenance-Active-success.svg)](https://github.com/cihaneray/Python-PortScanner)

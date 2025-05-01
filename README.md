@@ -236,7 +236,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [x] SYN Scanning
 - [x] JSON Format Output
 - [x] UDP Scanning
-- [ ] Service Version Detection
+- [x] Service Version Detection
 - [ ] IPv6 Support
 - [ ] OS Fingerprinting
 - [ ] Enhanced Reliability for UDP Scanning

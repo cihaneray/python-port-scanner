@@ -240,5 +240,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [ ] IPv6 Support
 - [ ] OS Fingerprinting
 - [ ] Enhanced Reliability for UDP Scanning
-- [ ] GUI Interface
 - [ ] Vulnerability Detection

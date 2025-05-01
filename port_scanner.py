@@ -13,13 +13,257 @@ from argparse import ArgumentParser, Namespace
 from queue import Queue, Empty
 from typing import List, Dict
 
+# For SYN and UDP scanning
+SCAPY_AVAILABLE = False
 try:
-    # Try to import scapy for SYN scanning
-    from scapy.all import sr1, IP, TCP, UDP, ICMP, conf
-
+    from scapy.all import IP, TCP, UDP, ICMP, sr1, conf
     SCAPY_AVAILABLE = True
 except ImportError:
-    SCAPY_AVAILABLE = False
+    pass
+
+
+class ServiceProber:
+    """Service identification and version detection module."""
+
+    def __init__(self, timeout=2.0, intensity=5):
+        self.timeout = timeout
+        self.intensity = intensity  # 0-9, higher means more probes/aggressiveness
+
+        # Cache for service probes to avoid redundant network calls
+        self.service_cache = {}
+
+        # Protocol-specific probes - each is a tuple of (probe_data, response_pattern, version_extract_regex)
+        self.probes = {
+            'http': [
+                (b"GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: Advanced-Port-Scanner\r\nAccept: */*\r\n\r\n",
+                 b"HTTP/", r"Server: ([^\r\n]+)"),
+                (b"HEAD / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: Advanced-Port-Scanner\r\nAccept: */*\r\n\r\n",
+                 b"HTTP/", r"Server: ([^\r\n]+)")
+            ],
+            'https': [
+                # HTTPS requires SSL/TLS handshake before sending HTTP requests
+                # This is handled separately in the probe_https method
+            ],
+            'smtp': [
+                (b"EHLO advanced-port-scanner.local\r\n",
+                 b"220", r"220 ([^\r\n]+)"),
+                (b"HELO advanced-port-scanner.local\r\n",
+                 b"220", r"220 ([^\r\n]+)")
+            ],
+            'pop3': [
+                (b"CAPA\r\n",
+                 b"+OK", r"\+OK ([^\r\n]+)"),
+                (b"", b"+OK", r"\+OK ([^\r\n]+)")
+            ],
+            'imap': [
+                (b"A001 CAPABILITY\r\n",
+                 b"* CAPABILITY", r"(IMAP[^\r\n]+)"),
+                (b"", b"* OK", r"\* OK ([^\r\n]+)")
+            ],
+            'ftp': [
+                (b"", b"220", r"220[\- ]([^\r\n]+)"),
+                (b"HELP\r\n", b"214", r"([^\r\n]+)")
+            ],
+            'ssh': [
+                (b"", b"SSH", r"(SSH[^\r\n]+)")
+            ],
+            'telnet': [
+                (b"", b"", r"([^\r\n]+)")
+            ],
+            'mysql': [
+                (b"\x1a\x00\x00\x00\x0a\x35\x2e\x35\x2e\x35\x00",  # MySQL client handshake
+                 b"", r"([0-9]+\.[0-9]+\.[0-9]+)")
+            ],
+            'mssql': [
+                (b"\x12\x01\x00\x34\x00\x00\x00\x00\x00\x00\x15\x00\x06\x01\x00\x1b\x00\x01\x02\x00\x1c\x00\x0c\x03\x00\x28\x00\x04\x04\x00\x38\x00\x01\x05\x00\x39\x00\x01\x06\x00\x3a\x00\x01\x07\x00\x3b\x00\x01",
+                 b"", r"Microsoft SQL Server ([0-9]+)")
+            ],
+            'redis': [
+                (b"INFO\r\n",
+                 b"redis_version", r"redis_version:([^\r\n]+)")
+            ],
+            'mongodb': [
+                (b"\x41\x00\x00\x00\x3a\x30\x00\x00\x00\x00\x00\x00\xd4\x07\x00\x00\x00\x00\x00\x00\x61\x64\x6d\x69\x6e\x2e\x24\x63\x6d\x64\x00\x00\x00\x00\x00\xff\xff\xff\xff\x19\x00\x00\x00\x10\x69\x73\x6d\x61\x73\x74\x65\x72\x00\x01\x00\x00\x00\x00",
+                 b"", r"version.: .([0-9]+\.[0-9]+\.[0-9]+).")
+            ],
+            'dns': [
+                (b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07\x76\x65\x72\x73\x69\x6f\x6e\x04\x62\x69\x6e\x64\x00\x00\x10\x00\x03",
+                 b"", r"version.bind.\s+([^\s]+)")
+            ],
+            'postgresql': [
+                (b"\x00\x00\x00\x08\x04\xd2\x16\x2f",
+                 b"", r"PostgreSQL ([0-9]+\.[0-9]+)")
+            ],
+            'rdp': [
+                (b"\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00",
+                 b"", r"")  # RDP just check connection response
+            ],
+            'vnc': [
+                (b"RFB 003.008\n",
+                 b"RFB", r"RFB ([0-9]+\.[0-9]+)")
+            ],
+            'ldap': [
+                (b"\x30\x0c\x02\x01\x01\x60\x07\x02\x01\x03\x04\x00\x80\x00",
+                 b"", r"")  # Just check LDAP response
+            ],
+            # Default probe for other services
+            'default': [
+                (b"\r\n\r\n", b"", r"([^\r\n]+)"),
+                (b"HELP\r\n", b"", r"([^\r\n]+)"),
+                (b"", b"", r"([^\r\n]+)")
+            ]
+        }
+
+        # Common protocol port mappings
+        self.port_to_protocol = {
+            21: 'ftp', 22: 'ssh', 23: 'telnet', 25: 'smtp', 53: 'dns',
+            80: 'http', 110: 'pop3', 143: 'imap', 389: 'ldap', 443: 'https',
+            445: 'smb', 1433: 'mssql', 1521: 'oracle', 3306: 'mysql',
+            3389: 'rdp', 5432: 'postgresql', 5900: 'vnc', 6379: 'redis',
+            8080: 'http', 8443: 'https', 27017: 'mongodb'
+        }
+
+    def get_protocol_for_port(self, port):
+        """Determine likely protocol based on port number."""
+        return self.port_to_protocol.get(port, 'default')
+
+    def detect_service_version(self, ip, port, protocol='tcp'):
+        """Detect service version by sending appropriate probes."""
+        # Check cache first to avoid unnecessary network calls
+        cache_key = f"{ip}:{port}:{protocol}"
+        if cache_key in self.service_cache:
+            return self.service_cache[cache_key]
+
+        if protocol == 'udp':
+            # UDP service detection is more complex and less reliable
+            result = self.detect_udp_service(port)
+            self.service_cache[cache_key] = result
+            return result
+
+        # For TCP, we'll use our probe data
+        service_protocol = self.get_protocol_for_port(port)
+
+        # Special handling for HTTPS
+        if service_protocol == 'https':
+            result = self.probe_https(ip, port)
+            self.service_cache[cache_key] = result
+            return result
+
+        # Get applicable probes based on intensity
+        probe_count = max(1, min(len(self.probes.get(service_protocol, [])), self.intensity))
+        active_probes = self.probes.get(service_protocol, [])[:probe_count]
+
+        # If no specific probes available, use default ones
+        if not active_probes:
+            active_probes = self.probes['default'][:probe_count]
+
+        # Try each probe
+        for probe_data, response_pattern, regex_pattern in active_probes:
+            result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
+            if result:
+                self.service_cache[cache_key] = result
+                return result
+
+        # Try default probes as a fallback
+        if service_protocol != 'default':
+            for probe_data, response_pattern, regex_pattern in self.probes['default'][:2]:
+                result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
+                if result:
+                    self.service_cache[cache_key] = result
+                    return result
+
+        # Cache and return generic message as fallback
+        result = "Service running"
+        self.service_cache[cache_key] = result
+        return result
+
+    def send_probe(self, ip, port, probe_data, response_pattern, regex_pattern):
+        """Send a probe to the service and analyze the response."""
+        import re
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(self.timeout)
+                s.connect((ip, port))
+
+                if probe_data:  # Some probes just listen without sending
+                    s.send(probe_data)
+
+                # Receive data
+                response = b""
+                try:
+                    response = s.recv(4096)
+                except socket.timeout:
+                    pass
+
+                # If we're looking for a specific pattern and don't find it, continue
+                if response_pattern and response_pattern not in response:
+                    return None
+
+                # Extract version using regex if provided
+                if regex_pattern and regex_pattern != r"":
+                    match = re.search(regex_pattern, response.decode('utf-8', errors='ignore'))
+                    if match:
+                        return match.group(1).strip()
+
+                # If we received a response but couldn't extract a version, return a generic message
+                if response:
+                    # Return first line of response, cleaned up
+                    first_line = response.decode('utf-8', errors='ignore').split('\n')[0].strip()
+                    if first_line:
+                        return first_line[:50]  # Limit length
+
+            return None
+        except (socket.error, socket.timeout):
+            return None
+
+    def probe_https(self, ip, port):
+        """Special handling for HTTPS services with SSL/TLS."""
+        try:
+            import ssl
+            import socket
+            import re
+
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            with socket.create_connection((ip, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=ip) as ssock:
+                    # Get certificate info
+                    cert = ssock.getpeercert(binary_form=False)
+
+                    # Send HTTP request to get server header
+                    ssock.send(
+                        b"HEAD / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: Advanced-Port-Scanner\r\nAccept: */*\r\n\r\n")
+                    response = ssock.recv(4096)
+
+                    # Try to extract server header
+                    server_header = None
+                    response_str = response.decode('utf-8', errors='ignore')
+
+                    match = re.search(r"Server: ([^\r\n]+)", response_str)
+                    if match:
+                        server_header = match.group(1).strip()
+
+                    # Format result
+                    if server_header:
+                        return f"HTTPS ({server_header})"
+                    else:
+                        return "HTTPS"
+        except Exception:
+            # If HTTPS probe fails, return generic HTTPS
+            return "HTTPS"
+
+    @staticmethod
+    def detect_udp_service(port):
+        """Basic UDP service detection."""
+        udp_services = {
+            53: "DNS", 67: "DHCP", 68: "DHCP", 69: "TFTP",
+            123: "NTP", 161: "SNMP", 500: "IKE", 514: "Syslog"
+        }
+
+        return udp_services.get(port, "UDP Service")
 
 
 class PortScanner:
@@ -31,8 +275,18 @@ class PortScanner:
         self.total_ports = 0
         self.scanned_ports = 0
         self.start_time = 0
+        self.service_info_cache: Dict[str, str] = {}  # Cache for service info to avoid redundant probes
+
+        # Rate limiting
+        self.rate_limit = 0  # Packets per second (0 = no limit)
+        self.last_scan_time = 0
+        self.rate_limit_lock = threading.Lock()
 
         self.args = self.parse_arguments()
+
+        # Set up rate limiting if needed
+        if hasattr(self.args, 'rate') and self.args.rate > 0:
+            self.rate_limit = self.args.rate
 
         # Validate arguments
         if self.args.threads < 1:
@@ -82,9 +336,14 @@ class PortScanner:
         parser.add_argument('-b', '--banner', action='store_true', help='Attempt to grab banners from open ports')
         parser.add_argument('-s', '--syn', action='store_true', help='Use SYN scanning (requires root/admin)')
         parser.add_argument('-u', '--udp', action='store_true', help='Perform UDP scanning (requires root/admin)')
+        parser.add_argument('-V', '--version-detection', action='store_true', help='Perform service version detection')
         parser.add_argument('--json', action='store_true', help='Output results in JSON format')
         parser.add_argument('--config', help='Path to custom port configuration file')
         parser.add_argument('--udp-retry', type=int, default=3, help='Number of retries for UDP scanning (default: 3)')
+        parser.add_argument('--version-intensity', type=int, choices=range(0, 10), default=5,
+                            help='Service version detection intensity (0-9, higher is more aggressive)')
+        parser.add_argument('--rate', type=int, default=0,
+                            help='Rate limit: maximum packets per second (0 = no limit)')
 
         return parser.parse_args()
 
@@ -177,6 +436,7 @@ class PortScanner:
 
     @staticmethod
     def is_ip(s: str) -> bool:
+        """Check if string is a valid IP address."""
         try:
             ipaddress.ip_address(s)
             return True
@@ -249,10 +509,13 @@ class PortScanner:
             if isinstance(port_list, range) and len(port_list) > 10:
                 print(f"Port range: {start_port}-{end_port}")
             else:
-                print(f"Ports: {', '.join(map(str, port_list[:10]))}{' ...' if len(port_list) > 10 else ''}")
+                print(f"Ports: {', '.join(map(str, list(port_list)[:10]))}{' ...' if len(port_list) > 10 else ''}")
 
             print(f"Number of threads: {self.args.threads}")
-            print(f"Timeout: {self.args.timeout} seconds\n")
+            print(f"Timeout: {self.args.timeout} seconds")
+            if self.rate_limit > 0:
+                print(f"Rate limit: {self.rate_limit} packets/second")
+            print()
 
         # Fill the queue with (target, port, protocol) tuples to scan
         for target in targets:
@@ -289,6 +552,25 @@ class PortScanner:
                 self.save_json_results(targets)
             else:
                 self.save_results(targets)
+
+    def apply_rate_limit(self):
+        """Apply rate limiting if enabled."""
+        if self.rate_limit <= 0:
+            return
+
+        with self.rate_limit_lock:
+            current_time = time.time()
+            elapsed = current_time - self.last_scan_time
+
+            # Calculate minimum delay between packets
+            min_delay = 1.0 / self.rate_limit
+
+            # If we need to wait to maintain the rate limit
+            if elapsed < min_delay:
+                sleep_time = min_delay - elapsed
+                time.sleep(sleep_time)
+
+            self.last_scan_time = time.time()
 
     def tcp_connect_scan(self, target_ip: str, port: int) -> bool:
         """Test if a port is open using TCP connect scan."""
@@ -377,31 +659,67 @@ class PortScanner:
         return True
 
     def grab_banner(self, ip: str, port: int, protocol: str = 'tcp') -> str:
-        """Attempt to grab service banner from open port."""
-        if not self.args.banner or protocol == 'udp':  # Banner grabbing not supported for UDP
+        """Attempt to grab service banner from open port with enhanced detection."""
+        if not self.args.banner and not self.args.version_detection:
             return ""
 
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(2)
-                s.connect((ip, port))
-                # Try common protocols based on port
-                if port in [80, 8080, 443, 8443]:
-                    s.send(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                else:
-                    # Generic request that might trigger a response
-                    s.send(b"\r\n\r\n")
-                return s.recv(1024).decode('utf-8', errors='ignore').strip()[:50]  # Limit to 50 chars
-        except:
+        if protocol == 'udp':  # Basic handling for UDP
+            if self.args.version_detection:
+                prober = ServiceProber(timeout=max(2.0, self.args.timeout),
+                                       intensity=self.args.version_intensity)
+                return prober.detect_udp_service(port)
             return ""
+
+        # For TCP ports with version detection
+        if self.args.version_detection:
+            prober = ServiceProber(timeout=max(2.0, self.args.timeout),
+                                   intensity=self.args.version_intensity)
+            version = prober.detect_service_version(ip, port, protocol)
+            if version:
+                return version
+
+        # Fall back to regular banner grabbing if version detection failed or not enabled
+        if self.args.banner:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(max(2.0, self.args.timeout))
+                    s.connect((ip, port))
+
+                    # Try common protocols based on port
+                    if port in [80, 8080, 443, 8443]:
+                        s.send(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    elif port == 21:  # FTP
+                        # Just read banner, no need to send anything
+                        pass
+                    elif port == 25 or port == 587:  # SMTP
+                        # Just read banner, no need to send anything
+                        pass
+                    elif port == 22:  # SSH
+                        # Just read banner, no need to send anything
+                        pass
+                    else:
+                        # Generic request that might trigger a response
+                        s.send(b"\r\n\r\n")
+
+                    try:
+                        return s.recv(1024).decode('utf-8', errors='ignore').strip()[:75]  # Increased to 75 chars
+                    except socket.timeout:
+                        return "Connection established, no response"
+            except (socket.error, socket.timeout):
+                return ""
+
+        return ""
 
     def worker(self) -> None:
         """Worker thread to scan ports."""
         while True:
             try:
-                target_ip, port, protocol = self.queue.get(timeout=1)  # Fixed possible deadlock
+                target_ip, port, protocol = self.queue.get(timeout=1)
             except Empty:
                 break
+
+            # Apply rate limiting before scanning
+            self.apply_rate_limit()
 
             try:
                 is_open = False
@@ -415,16 +733,23 @@ class PortScanner:
                 elif protocol == 'udp':
                     is_open = self.udp_scan(target_ip, port)
 
-                # If port is open and banner grabbing is enabled, try to grab banner
-                # For SYN scan, we need to establish a new connection for banner grabbing
-                if is_open and self.args.banner and protocol == 'tcp':
-                    banner = self.grab_banner(target_ip, port, protocol)
-                    if banner and self.args.verbose:
+                # If port is open and banner grabbing or version detection is enabled
+                if is_open:
+                    service_info = ""
+                    if self.args.banner or self.args.version_detection:
+                        service_info = self.grab_banner(target_ip, port, protocol)
+
+                    if service_info and self.args.verbose:
                         with self.lock:
-                            print(f"\nFound open {protocol.upper()} port {port} on {target_ip} with banner: {banner}")
-                elif is_open and self.args.verbose:
-                    with self.lock:
-                        print(f"\nFound open {protocol.upper()} port {port} on {target_ip}")
+                            print(f"\nFound open {protocol.upper()} port {port} on {target_ip} - {service_info}")
+                    elif is_open and self.args.verbose:
+                        with self.lock:
+                            print(f"\nFound open {protocol.upper()} port {port} on {target_ip}")
+
+                    # If we're doing SYN scanning with version detection, we need to re-establish a full connection
+                    if self.args.syn and self.args.version_detection and not service_info and protocol == 'tcp':
+                        # Try to connect and get version info
+                        service_info = self.grab_banner(target_ip, port, protocol)
             except (socket.error, socket.timeout):
                 pass
 
@@ -459,8 +784,19 @@ class PortScanner:
         except:
             return "Unknown"
 
+    def _determine_scan_types(self) -> str:
+        # Determine scan types used
+        scan_types = []
+        if not self.args.udp or self.args.syn:  # Default is TCP unless only UDP is specified
+            scan_types.append("SYN" if self.args.syn else "TCP Connect")
+        if self.args.udp:
+            scan_types.append("UDP")
+        if self.args.version_detection:
+            scan_types.append("Version Detection")
+        return " and ".join(scan_types)
+
     def print_results(self, targets: List[str]) -> None:
-        """Display scan results."""
+        """Display scan results with enhanced version information."""
         elapsed = time.time() - self.start_time
 
         # Calculate total open ports (TCP + UDP)
@@ -469,13 +805,7 @@ class PortScanner:
         total_open = total_tcp_open + total_udp_open
 
         # Determine scan types used
-        scan_types = []
-        if not self.args.udp or self.args.syn:  # Default is TCP unless only UDP is specified
-            scan_types.append("SYN" if self.args.syn else "TCP Connect")
-        if self.args.udp:
-            scan_types.append("UDP")
-
-        scan_type_str = " and ".join(scan_types)
+        scan_type_str = self._determine_scan_types()
 
         print(f"\nScan completed in {elapsed:.2f} seconds")
         print(f"Scan type: {scan_type_str}")
@@ -499,28 +829,41 @@ class PortScanner:
                 # Display TCP ports if any
                 if tcp_open_ports:
                     print("\nTCP PORTS:")
-                    print("PORT     SERVICE" + ("       BANNER" if self.args.banner else ""))
-                    print("-" * (20 + (50 if self.args.banner else 0)))
+                    header = "PORT     SERVICE"
+                    if self.args.version_detection:
+                        header += "         VERSION"
+                    elif self.args.banner:
+                        header += "         BANNER"
+                    print(header)
+                    print("-" * (max(20, len(header))))
 
                     for port in tcp_open_ports:
                         service = self.get_service_name(port)
-                        if self.args.banner:
-                            banner = self.grab_banner(target, port)
-                            banner_display = banner[:50] + "..." if len(banner) > 50 else banner
-                            banner_clean = banner_display.replace('\r', '').replace('\n', ' ')
-                            print(f"{port:<8} {service:<12} {banner_clean}")
+                        if self.args.version_detection or self.args.banner:
+                            version_info = self.grab_banner(target, port)
+                            version_display = version_info[:60] + "..." if len(version_info) > 60 else version_info
+                            version_clean = version_display.replace('\r', '').replace('\n', ' ')
+                            print(f"{port:<8} {service:<12} {version_clean}")
                         else:
                             print(f"{port:<8} {service}")
 
-                # Display UDP ports if any
+                # Display UDP ports if any with version detection
                 if udp_open_ports:
                     print("\nUDP PORTS:")
-                    print("PORT     SERVICE")
-                    print("-" * 20)
+                    header = "PORT     SERVICE"
+                    if self.args.version_detection:
+                        header += "         VERSION"
+                    print(header)
+                    print("-" * (max(20, len(header))))
 
                     for port in udp_open_ports:
                         service = self.get_service_name(port)
-                        print(f"{port:<8} {service}")
+                        if self.args.version_detection:
+                            version_info = self.grab_banner(target, port, 'udp')
+                            version_clean = version_info.replace('\r', '').replace('\n', ' ')
+                            print(f"{port:<8} {service:<12} {version_clean}")
+                        else:
+                            print(f"{port:<8} {service}")
 
                 print()
             elif not self.args.quiet:
@@ -528,17 +871,11 @@ class PortScanner:
                 print("No open ports found.\n")
 
     def save_results(self, targets: List[str]) -> None:
-        """Save scan results to a file."""
+        """Save scan results to a file with version detection info."""
         try:
             with open(self.args.output, 'w') as f:
                 # Determine scan types used
-                scan_types = []
-                if not self.args.udp or self.args.syn:  # Default is TCP unless only UDP is specified
-                    scan_types.append("SYN" if self.args.syn else "TCP Connect")
-                if self.args.udp:
-                    scan_types.append("UDP")
-
-                scan_type_str = " and ".join(scan_types)
+                scan_type_str = self._determine_scan_types()
 
                 f.write(f"Port scan results ({scan_type_str} scan)\n")
                 f.write(f"Scan date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -567,28 +904,42 @@ class PortScanner:
                         # Write TCP ports if any
                         if tcp_open_ports:
                             f.write("\nTCP PORTS:\n")
-                            f.write("PORT     SERVICE" + ("       BANNER" if self.args.banner else "") + "\n")
-                            f.write("-" * (20 + (50 if self.args.banner else 0)) + "\n")
+                            header = "PORT     SERVICE"
+                            if self.args.version_detection:
+                                header += "         VERSION"
+                            elif self.args.banner:
+                                header += "         BANNER"
+                            f.write(header + "\n")
+                            f.write("-" * (max(20, len(header))) + "\n")
 
                             for port in tcp_open_ports:
                                 service = self.get_service_name(port)
-                                if self.args.banner:
-                                    banner = self.grab_banner(target, port)
-                                    banner_display = banner[:50] + "..." if len(banner) > 50 else banner
-                                    banner_clean = banner_display.replace('\r', '').replace('\n', ' ')
-                                    f.write(f"{port:<8} {service:<12} {banner_clean}\n")
+                                if self.args.version_detection or self.args.banner:
+                                    version_info = self.grab_banner(target, port)
+                                    version_display = version_info[:60] + "..." if len(
+                                        version_info) > 60 else version_info
+                                    version_clean = version_display.replace('\r', '').replace('\n', ' ')
+                                    f.write(f"{port:<8} {service:<12} {version_clean}\n")
                                 else:
                                     f.write(f"{port:<8} {service}\n")
 
                         # Write UDP ports if any
                         if udp_open_ports:
                             f.write("\nUDP PORTS:\n")
-                            f.write("PORT     SERVICE\n")
-                            f.write("-" * 20 + "\n")
+                            header = "PORT     SERVICE"
+                            if self.args.version_detection:
+                                header += "         VERSION"
+                            f.write(header + "\n")
+                            f.write("-" * (max(20, len(header))) + "\n")
 
                             for port in udp_open_ports:
                                 service = self.get_service_name(port)
-                                f.write(f"{port:<8} {service}\n")
+                                if self.args.version_detection:
+                                    version_info = self.grab_banner(target, port, 'udp')
+                                    version_clean = version_info.replace('\r', '').replace('\n', ' ')
+                                    f.write(f"{port:<8} {service:<12} {version_clean}\n")
+                                else:
+                                    f.write(f"{port:<8} {service}\n")
                     else:
                         f.write("No open ports found.\n")
                     f.write("\n")
@@ -598,16 +949,10 @@ class PortScanner:
             print(f"Error saving results: {e}")
 
     def save_json_results(self, targets: List[str]) -> None:
-        """Save scan results to a JSON file."""
+        """Save scan results to a JSON file with version detection."""
         try:
             # Determine scan types used
-            scan_types = []
-            if not self.args.udp or self.args.syn:  # Default is TCP unless only UDP is specified
-                scan_types.append("SYN" if self.args.syn else "TCP Connect")
-            if self.args.udp:
-                scan_types.append("UDP")
-
-            scan_type_str = " and ".join(scan_types)
+            scan_type_str = self._determine_scan_types()
 
             results = {
                 "scan_info": {
@@ -642,7 +987,10 @@ class PortScanner:
                         "service": service
                     }
 
-                    if self.args.banner:
+                    if self.args.version_detection:
+                        version_info = self.grab_banner(target, port)
+                        port_data["version"] = version_info
+                    elif self.args.banner:
                         banner = self.grab_banner(target, port)
                         port_data["banner"] = banner
 
@@ -656,6 +1004,11 @@ class PortScanner:
                             "port": port,
                             "service": service
                         }
+
+                        if self.args.version_detection:
+                            version_info = self.grab_banner(target, port, 'udp')
+                            port_data["version"] = version_info
+
                         target_data["udp_ports"].append(port_data)
 
                 results["targets"][target] = target_data

@@ -75,6 +75,18 @@ class PortScanner:
             print("Error: SYN scanning requires the 'scapy' library")
             print("Please install it using: pip install scapy")
             sys.exit(1)
+            
+        if self.args.os_detection:
+            if not SCAPY_AVAILABLE:
+                print("Error: OS detection requires the 'scapy' library")
+                print("Please install it using: pip install scapy")
+                sys.exit(1)
+            if not self._is_root():
+                print("Error: OS detection requires root/administrator privileges")
+                sys.exit(1)
+
+            # Store OS fingerprinting results
+            self.os_results = {}
 
         # Load common ports from config file
         self.common_ports = self.load_port_config()
@@ -102,6 +114,9 @@ class PortScanner:
                             help='Service version detection intensity (0-9, higher is more aggressive)')
         parser.add_argument('--rate', type=int, default=0,
                             help='Rate limit: maximum packets per second (0 = no limit)')
+        parser.add_argument('--os-detection', action='store_true', help='Perform OS detection (requires root/admin)')
+        parser.add_argument('--os-detection-timeout', type=float, default=1.0,
+                            help='Timeout for OS detection probes in seconds (default: 1.0)')
 
         return parser.parse_args()
 
@@ -200,6 +215,19 @@ class PortScanner:
             return True
         except ValueError:
             return False
+
+    def perform_os_detection(self, target: str) -> dict:
+        """Perform OS detection on the target."""
+        from os_fingerprinter import OSFingerprinter
+
+        # Get open ports for this target to improve accuracy
+        open_ports = self.open_ports.get(target)
+
+        # Create fingerprinter with configured timeout
+        fingerprinter = OSFingerprinter(timeout=self.args.os_detection_timeout)
+
+        # Perform fingerprinting
+        return fingerprinter.fingerprint_os(target, open_ports)
 
     def scan(self) -> None:
         # Parse port range
@@ -300,6 +328,21 @@ class PortScanner:
 
         # Wait for all ports to be scanned
         self.queue.join()
+
+        if self.args.os_detection:
+            print("Performing OS detection...")
+            for target in targets:
+                sys.stdout.write(f"\r  OS detection for {target}...")
+                sys.stdout.flush()
+
+                # Only perform OS detection on hosts with open ports
+                if target in self.open_ports and self.open_ports[target]:
+                    os_result = self.perform_os_detection(target)
+                    self.os_results[target] = os_result
+                    sys.stdout.write(f"\r  OS detection for {target}: {os_result['os']} "
+                                     f"(Confidence: {os_result['confidence']}%)\n")
+                else:
+                    sys.stdout.write(f"\r  OS detection for {target}: Skipped (no open ports)\n")
 
         # Display results
         self.print_results(targets)
@@ -584,6 +627,13 @@ class PortScanner:
                 print(f"Open ports: {len(tcp_open_ports) + len(udp_open_ports)} "
                       f"(TCP: {len(tcp_open_ports)}, UDP: {len(udp_open_ports)})")
 
+                if self.args.os_detection and target in self.os_results:
+                    os_info = self.os_results[target]
+                    print(f"OS Detection: {os_info['os']} (Confidence: {os_info['confidence']}%)")
+                    if self.args.verbose and 'reason' in os_info:
+                        print(f"Detection method: {os_info['reason']}")
+                    print()
+
                 # Display TCP ports if any
                 if tcp_open_ports:
                     print("\nTCP PORTS:")
@@ -646,6 +696,13 @@ class PortScanner:
                 f.write(f"Total open ports found: {total_open} (TCP: {total_tcp_open}, UDP: {total_udp_open})\n\n")
 
                 for target in targets:
+                    if self.args.os_detection and target in self.os_results:
+                        os_info = self.os_results[target]
+                        f.write(f"OS Detection: {os_info['os']} (Confidence: {os_info['confidence']}%)\n")
+                        if 'reason' in os_info:
+                            f.write(f"Detection method: {os_info['reason']}\n")
+                        f.write("\n")
+
                     tcp_open_ports = self.open_ports[target]
                     tcp_open_ports.sort()
 
@@ -736,6 +793,9 @@ class PortScanner:
                     "tcp_ports": [],
                     "udp_ports": [] if self.args.udp else None
                 }
+
+                if self.args.os_detection and target in self.os_results:
+                    target_data["os_detection"] = self.os_results[target]
 
                 # Add TCP ports
                 for port in tcp_open_ports:

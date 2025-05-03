@@ -4,7 +4,7 @@ OS Fingerprinter Module for advanced port scanner.
 Performs OS detection based on TCP/IP stack behavior.
 """
 import logging
-from scapy.layers.inet import IP, TCP, sr1, RandShort, ICMP, conf
+from scapy.all import IP, TCP, sr1, RandShort, ICMP, conf  # Fixed import from scapy.all
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 conf.verb = 0  # Disable verbose output
@@ -19,6 +19,8 @@ class OSFingerprinter:
     def __init__(self, timeout=1.0):
         self.timeout = timeout
         self.os_signatures = self._load_os_signatures()
+        self.target_ip = None  # Initialize instance variables
+        self.open_ports = []
 
     @staticmethod
     def _load_os_signatures():
@@ -135,15 +137,15 @@ class OSFingerprinter:
         results = []
 
         try:
-            # SYN probe to open port
-            probe_result = self._syn_probe(target_ip, self.open_ports)
-            if probe_result:
-                results.extend(probe_result)
-
             # ICMP Echo probe
             icmp_result = self._icmp_probe(target_ip)
             if icmp_result:
                 results.extend(icmp_result)
+
+            # SYN probe to open port
+            probe_result = self._syn_probe(target_ip, self.open_ports)
+            if probe_result:
+                results.extend(probe_result)
 
             # TCP NULL probe to open port
             null_result = self._tcp_null_probe(target_ip, self.open_ports)
@@ -172,7 +174,7 @@ class OSFingerprinter:
         if not open_ports or len(open_ports) == 0:
             test_ports = [80, 443, 22]
         else:
-            test_ports = open_ports[:3]
+            test_ports = open_ports[:5]
 
         for port in test_ports:
             try:
@@ -183,10 +185,11 @@ class OSFingerprinter:
                 if response and response.haslayer(TCP):
                     ttl = response.ttl
                     window_size = response.getlayer(TCP).window
-                    df = bool(response.flags & 0x02)
+                    df = bool(response.flags.DF)  # Fixed: Use flags.DF property instead of bit manipulation
                     tos = response.tos
-                    tcp_options = [opt_name for opt_name, _ in response.getlayer(TCP).options] if response.haslayer(
-                        TCP) and response.getlayer(TCP).options else []
+                    tcp_options = [opt[0] for opt in response.getlayer(TCP).options] if response.haslayer(
+                        TCP) and hasattr(response.getlayer(TCP), 'options') else []
+                    # Fixed: Extract option names correctly
 
                     matches = self._match_signature("syn_ack", ttl, window_size, df, tos, tcp_options)
                     if matches:
@@ -207,7 +210,7 @@ class OSFingerprinter:
 
             if response and response.haslayer(ICMP):
                 ttl = response.ttl
-                df = bool(response.flags & 0x02)
+                df = bool(response.flags.DF)  # Fixed: Use flags.DF property
                 matches = self._match_signature("icmp_echo", ttl, None, df, None, None)  # Only checking TTL and DF
                 if matches:
                     results.extend(matches)
@@ -231,12 +234,13 @@ class OSFingerprinter:
 
                 observed_response = "none"
                 if response and response.haslayer(TCP):
-                    if response.flags == "RA":
+                    tcp_flags = response.getlayer(TCP).flags
+                    if tcp_flags == 0x14:  # RST+ACK (0x14 = 20 in decimal)
                         observed_response = "rstack"
-                    elif response.flags == "R":
+                    elif tcp_flags == 0x04:  # RST (0x04 = 4 in decimal)
                         observed_response = "rst"
 
-                matches = self._match_signature("tcp_null", observed_response=observed_response)
+                matches = self._match_tcp_probe_signature("tcp_null", observed_response)  # Fixed function name
                 if matches:
                     results.extend(matches)
 
@@ -260,12 +264,13 @@ class OSFingerprinter:
 
                 observed_response = "none"
                 if response and response.haslayer(TCP):
-                    if response.flags == "RA":
+                    tcp_flags = response.getlayer(TCP).flags
+                    if tcp_flags == 0x14:  # RST+ACK (0x14 = 20 in decimal)
                         observed_response = "rstack"
-                    elif response.flags == "R":
+                    elif tcp_flags == 0x04:  # RST (0x04 = 4 in decimal)
                         observed_response = "rst"
 
-                matches = self._match_signature("tcp_fin", observed_response=observed_response)
+                matches = self._match_tcp_probe_signature("tcp_fin", observed_response)  # Fixed function name
                 if matches:
                     results.extend(matches)
 
@@ -273,8 +278,21 @@ class OSFingerprinter:
                 logging.warning(f"Error during TCP FIN probe to port {port}: {e}")
         return results
 
-    def _match_signature(self, probe_type, ttl=None, window_size=None, df=None, tos=None, tcp_options=None,
-                         observed_response=None):
+    def _match_tcp_probe_signature(self, probe_type, observed_response):
+        """Match observed response for TCP NULL/FIN probes against signatures."""
+        matches = []
+        for os_name, signature in self.os_signatures.items():
+            if probe_type in signature:
+                sig = signature[probe_type]
+                response_match = sig.get("response") is None or (
+                        observed_response is not None and sig["response"] == observed_response)
+
+                if response_match:
+                    confidence = signature.get("confidence_weight", 0.5)
+                    matches.append((os_name, confidence))
+        return matches
+
+    def _match_signature(self, probe_type, ttl=None, window_size=None, df=None, tos=None, tcp_options=None):
         """Match observed characteristics against signatures for a specific probe type."""
         matches = []
         for os_name, signature in self.os_signatures.items():
@@ -282,17 +300,21 @@ class OSFingerprinter:
                 sig = signature[probe_type]
                 ttl_match = sig.get("ttl") is None or (ttl is not None and sig["ttl"][0] <= ttl <= sig["ttl"][1])
                 win_match = sig.get("window_size") is None or (
-                            window_size is not None and sig["window_size"][0] <= window_size <= sig["window_size"][1])
+                        window_size is not None and sig["window_size"][0] <= window_size <= sig["window_size"][1])
                 df_match = sig.get("df") is None or (df is not None and sig["df"] == df)
                 tos_match = sig.get("tos") is None or (tos is not None and sig["tos"] == tos)
-                options_match = sig.get("tcp_options") is None or (
-                            tcp_options is not None and set(sig["tcp_options"]).issubset(set(tcp_options)))
-                option_order_match = sig.get("option_order") is None or (
-                            tcp_options is not None and self._check_option_order(sig["option_order"], tcp_options))
-                response_match = sig.get("response") is None or (
-                            observed_response is not None and sig["response"] == observed_response)
 
-                if all([ttl_match, win_match, df_match, tos_match, options_match, response_match]):
+                # Fixed option matching
+                options_match = True
+                if sig.get("tcp_options") is not None and tcp_options is not None:
+                    # Check if all required options are present (not necessarily in order)
+                    options_match = all(opt in tcp_options for opt in sig["tcp_options"])
+
+                option_order_match = True
+                if sig.get("option_order") is not None and tcp_options is not None:
+                    option_order_match = self._check_option_order(sig["option_order"], tcp_options)
+
+                if all([ttl_match, win_match, df_match, tos_match, options_match, option_order_match]):
                     confidence = signature.get("confidence_weight", 0.5)
                     matches.append((os_name, confidence))
         return matches
@@ -300,17 +322,20 @@ class OSFingerprinter:
     @staticmethod
     def _check_option_order(expected_order, observed_options):
         """Checks if the observed TCP options contain the expected options in the specified order."""
-        obs_ptr = 0
+        # Create a copy of observed options to track positions
+        observed_copy = observed_options.copy()
+        last_pos = -1
+
         for expected_opt in expected_order:
-            found = False
-            while obs_ptr < len(observed_options):
-                if observed_options[obs_ptr] == expected_opt:
-                    found = True
-                    obs_ptr += 1
-                    break
-                obs_ptr += 1
-            if not found:
+            if expected_opt not in observed_copy:
                 return False
+
+            pos = observed_copy.index(expected_opt)
+            if pos <= last_pos:  # Options must appear in expected order
+                return False
+
+            last_pos = pos
+
         return True
 
     def _analyze_results(self, results):
@@ -333,7 +358,7 @@ class OSFingerprinter:
             if os_name == "windows":
                 version = self._detect_windows_version(self.target_ip, self.open_ports)
                 if version:
-                    os_name = version
+                    os_name = f"{os_name} ({version})"  # Fixed: Better formatting for OS name with version
 
             return {"os": os_name.capitalize(), "confidence": confidence_percentage, "reason": "TCP/IP fingerprinting"}
         else:

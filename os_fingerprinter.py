@@ -24,7 +24,7 @@ class OSFingerprinter:
 
     @staticmethod
     def _load_os_signatures():
-        """Load OS fingerprinting signatures from known TCP/IP stack behaviors."""
+        """Load OS fingerprinting signatures."""
         # These are simplified signatures.
         return {
             "windows": {

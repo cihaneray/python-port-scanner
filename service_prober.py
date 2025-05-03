@@ -1,11 +1,32 @@
 #!/usr/bin/python3
 
+import re
+import socket
+import ssl
+import logging
+
+
 class ServiceProber:
     """Service identification and version detection module."""
 
-    def __init__(self, timeout=2.0, intensity=5):
+    def __init__(self, timeout=2.0, intensity=5, log_level=logging.WARNING):
+        """
+        Initialize ServiceProber with detection parameters.
+
+        Args:
+            timeout (float): Socket timeout in seconds
+            intensity (int): Probe intensity level (0-9)
+            log_level (int): Logging level for errors and warnings
+        """
         self.timeout = timeout
-        self.intensity = intensity  # 0-9, higher means more probes/aggressiveness
+        self.intensity = max(0, min(9, intensity))  # Ensure intensity is between 0-9
+
+        # Set up logging
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger('ServiceProber')
 
         # Cache for service probes to avoid redundant network calls
         self.service_cache = {}
@@ -102,77 +123,117 @@ class ServiceProber:
         }
 
     def get_protocol_for_port(self, port):
-        """Determine likely protocol based on port number."""
+        """
+        Determine likely protocol based on port number.
+
+        Args:
+            port (int): Port number to check
+
+        Returns:
+            str: Protocol name or 'default' if unknown
+        """
         return self.port_to_protocol.get(port, 'default')
 
     def detect_service_version(self, ip, port, protocol='tcp'):
-        """Detect service version by sending appropriate probes."""
+        """
+        Detect service version by sending appropriate probes.
+
+        Args:
+            ip (str): Target IP address
+            port (int): Target port number
+            protocol (str): 'tcp' or 'udp'
+
+        Returns:
+            str: Service and version information or None if detection failed
+        """
         # Check cache first to avoid unnecessary network calls
         cache_key = f"{ip}:{port}:{protocol}"
         if cache_key in self.service_cache:
             return self.service_cache[cache_key]
 
-        if protocol == 'udp':
-            # UDP service detection is more complex and less reliable
-            result = self.detect_udp_service(port)
-            self.service_cache[cache_key] = result
-            return result
+        try:
+            if protocol == 'udp':
+                # UDP service detection needs actual probing
+                result = self.detect_udp_service(ip, port)
+                if result:
+                    self.service_cache[cache_key] = result
+                    return result
+                return None
 
-        # For TCP, we'll use our probe data
-        service_protocol = self.get_protocol_for_port(port)
+            # For TCP, we'll use our probe data
+            service_protocol = self.get_protocol_for_port(port)
 
-        # Special handling for HTTPS
-        if service_protocol == 'https':
-            result = self.probe_https(ip, port)
-            self.service_cache[cache_key] = result
-            return result
+            # Special handling for HTTPS
+            if service_protocol == 'https':
+                result = self.probe_https(ip, port)
+                if result:
+                    self.service_cache[cache_key] = result
+                    return result
+                return None
 
-        # Get applicable probes based on intensity
-        probe_count = max(1, min(len(self.probes.get(service_protocol, [])), self.intensity))
-        active_probes = self.probes.get(service_protocol, [])[:probe_count]
+            # Get applicable probes based on intensity
+            probe_count = max(1, min(len(self.probes.get(service_protocol, [])), self.intensity))
+            active_probes = self.probes.get(service_protocol, [])[:probe_count]
 
-        # If no specific probes available, use default ones
-        if not active_probes:
-            active_probes = self.probes['default'][:probe_count]
+            # If no specific probes available, use default ones
+            if not active_probes:
+                active_probes = self.probes['default'][:probe_count]
 
-        # Try each probe
-        for probe_data, response_pattern, regex_pattern in active_probes:
-            result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
-            if result:
-                self.service_cache[cache_key] = result
-                return result
-
-        # Try default probes as a fallback
-        if service_protocol != 'default':
-            for probe_data, response_pattern, regex_pattern in self.probes['default'][:2]:
+            # Try each probe
+            for probe_data, response_pattern, regex_pattern in active_probes:
                 result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
                 if result:
                     self.service_cache[cache_key] = result
                     return result
 
-        # Cache and return generic message as fallback
-        result = "Service running"
-        self.service_cache[cache_key] = result
-        return result
+            # Try default probes as a fallback
+            if service_protocol != 'default':
+                for probe_data, response_pattern, regex_pattern in self.probes['default'][:2]:
+                    result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
+                    if result:
+                        self.service_cache[cache_key] = result
+                        return result
+
+            # Cache and return generic message as fallback
+            result = f"Unknown service on port {port}"
+            self.service_cache[cache_key] = result
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Error detecting service on {ip}:{port}: {str(e)}")
+            return None
 
     def send_probe(self, ip, port, probe_data, response_pattern, regex_pattern):
-        """Send a probe to the service and analyze the response."""
-        import re
-        import socket
+        """
+        Send a probe to the service and analyze the response.
 
+        Args:
+            ip (str): Target IP address
+            port (int): Target port number
+            probe_data (bytes): Data to send
+            response_pattern (bytes): Pattern to look for in response
+            regex_pattern (str): Regex to extract version info
+
+        Returns:
+            str: Service version info or None if not detected
+        """
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(self.timeout)
+                self.logger.debug(f"Connecting to {ip}:{port}")
                 s.connect((ip, port))
 
                 if probe_data:  # Some probes just listen without sending
+                    self.logger.debug(f"Sending probe to {ip}:{port}")
                     s.send(probe_data)
 
                 # Receive data
                 response = b""
                 try:
                     response = s.recv(4096)
+                    self.logger.debug(f"Received {len(response)} bytes from {ip}:{port}")
                 except socket.timeout:
+                    self.logger.debug(f"Socket timeout waiting for response from {ip}:{port}")
                     pass
 
                 # If we're looking for a specific pattern and don't find it, continue
@@ -181,36 +242,59 @@ class ServiceProber:
 
                 # Extract version using regex if provided
                 if regex_pattern and regex_pattern != r"":
-                    match = re.search(regex_pattern, response.decode('utf-8', errors='ignore'))
-                    if match:
-                        return match.group(1).strip()
+                    try:
+                        match = re.search(regex_pattern, response.decode('utf-8', errors='replace'))
+                        if match:
+                            return match.group(1).strip()
+                    except Exception as e:
+                        self.logger.warning(f"Error extracting regex from response: {str(e)}")
 
                 # If we received a response but couldn't extract a version, return a generic message
                 if response:
-                    # Return first line of response, cleaned up
-                    first_line = response.decode('utf-8', errors='ignore').split('\n')[0].strip()
-                    if first_line:
-                        return first_line[:50]  # Limit length
+                    try:
+                        # Return first line of response, cleaned up
+                        first_line = response.decode('utf-8', errors='replace').split('\n')[0].strip()
+                        if first_line:
+                            return first_line[:50]  # Limit length
+                    except Exception as e:
+                        self.logger.warning(f"Error processing response: {str(e)}")
 
             return None
-        except (socket.error, socket.timeout):
+        except (socket.error, socket.timeout) as e:
+            self.logger.debug(f"Socket error when probing {ip}:{port}: {str(e)}")
+            return None
+        except Exception as e:
+            self.logger.warning(f"Unexpected error when probing {ip}:{port}: {str(e)}")
             return None
 
     def probe_https(self, ip, port):
-        """Special handling for HTTPS services with SSL/TLS."""
-        try:
-            import ssl
-            import socket
-            import re
+        """
+        Special handling for HTTPS services with SSL/TLS.
 
+        Args:
+            ip (str): Target IP address
+            port (int): Target port number
+
+        Returns:
+            str: HTTPS service info or None if detection failed
+        """
+        try:
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
 
             with socket.create_connection((ip, port), timeout=self.timeout) as sock:
                 with context.wrap_socket(sock, server_hostname=ip) as ssock:
-                    # Get certificate info
+                    # Get certificate info and use it if available
                     cert = ssock.getpeercert(binary_form=False)
+                    cert_info = ""
+
+                    # Try to extract organization information from certificate
+                    if cert and 'subject' in cert:
+                        for field in cert['subject']:
+                            if field[0][0] == 'organizationName':
+                                cert_info = f" - {field[0][1]}"
+                                break
 
                     # Send HTTP request to get server header
                     ssock.send(
@@ -219,27 +303,83 @@ class ServiceProber:
 
                     # Try to extract server header
                     server_header = None
-                    response_str = response.decode('utf-8', errors='ignore')
+                    response_str = response.decode('utf-8', errors='replace')
 
                     match = re.search(r"Server: ([^\r\n]+)", response_str)
                     if match:
                         server_header = match.group(1).strip()
 
-                    # Format result
+                    # Format result with both certificate and server info if available
                     if server_header:
-                        return f"HTTPS ({server_header})"
+                        return f"HTTPS ({server_header}{cert_info})"
+                    elif cert_info:
+                        return f"HTTPS{cert_info}"
                     else:
                         return "HTTPS"
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"HTTPS probe failed for {ip}:{port}: {str(e)}")
             # If HTTPS probe fails, return generic HTTPS
             return "HTTPS"
 
-    @staticmethod
-    def detect_udp_service(port):
-        """Basic UDP service detection."""
+    def detect_udp_service(self, ip, port):
+        """
+        UDP service detection with actual probing.
+
+        Args:
+            ip (str): Target IP address
+            port (int): Target port number
+
+        Returns:
+            str: UDP service info or None if detection failed
+        """
+        # UDP service mappings for common ports
         udp_services = {
-            53: "DNS", 67: "DHCP", 68: "DHCP", 69: "TFTP",
-            123: "NTP", 161: "SNMP", 500: "IKE", 514: "Syslog"
+            53: ("DNS",
+                 b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07\x76\x65\x72\x73\x69\x6f\x6e\x04\x62\x69\x6e\x64\x00\x00\x10\x00\x03"),
+            67: ("DHCP",
+                 b"\x01\x01\x06\x00\x01\x23\x45\x67\x89\xAB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+            123: ("NTP", b"\x1b\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+            161: ("SNMP",
+                  b"\x30\x26\x02\x01\x01\x04\x06\x70\x75\x62\x6c\x69\x63\xa0\x19\x02\x01\x01\x02\x01\x00\x02\x01\x00\x30\x0e\x30\x0c\x06\x08\x2b\x06\x01\x02\x01\x01\x01\x00\x05\x00"),
+            500: ("IKE",
+                  b"\x00\x11\x22\x33\x44\x55\x66\x77\x00\x00\x00\x00\x00\x00\x00\x00\x01\x10\x02\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x00\x00\x00"),
+            514: ("Syslog", b"<14>May 01 12:34:56 test: probe\n")
         }
 
-        return udp_services.get(port, "UDP Service")
+        try:
+            # If we have a specific probe for this port, use it
+            if port in udp_services:
+                service_name, probe_data = udp_services[port]
+
+                # Create UDP socket and send probe
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.settimeout(self.timeout)
+                    s.sendto(probe_data, (ip, port))
+
+                    try:
+                        # Try to receive a response
+                        response, _ = s.recvfrom(4096)
+                        if response:
+                            return f"{service_name} (responded)"
+                    except socket.timeout:
+                        # No response, but we can still report the likely service
+                        return service_name
+
+            # Generic UDP probe
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(self.timeout)
+                # Send a simple probe
+                s.sendto(b"\r\n\r\n", (ip, port))
+
+                try:
+                    response, _ = s.recvfrom(4096)
+                    if response:
+                        return f"UDP Service on port {port} (responsive)"
+                except socket.timeout:
+                    pass
+
+            return f"UDP Service on port {port}"
+
+        except Exception as e:
+            self.logger.debug(f"UDP probe failed for {ip}:{port}: {str(e)}")
+            return None

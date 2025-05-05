@@ -12,7 +12,7 @@ import time
 from argparse import ArgumentParser, Namespace
 from queue import Queue, Empty
 from typing import List, Dict
-from service_prober import ServiceProber
+from modules.service_prober import ServiceProber
 
 # For SYN and UDP scanning
 SCAPY_AVAILABLE = False
@@ -218,7 +218,7 @@ class PortScanner:
 
     def perform_os_detection(self, target: str) -> dict:
         """Perform OS detection on the target."""
-        from os_fingerprinter import OSFingerprinter
+        from modules.os_fingerprinter import OSFingerprinter
 
         # Get open ports for this target to improve accuracy
         open_ports = self.open_ports.get(target)

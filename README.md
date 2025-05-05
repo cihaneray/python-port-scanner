@@ -7,13 +7,13 @@
 A versatile, **multithreaded** port scanner written in **Python** that supports **TCP** Connect, **SYN**, and **UDP** scanning methods. This tool allows you to scan for open ports on target hosts, with support for individual hosts, IP addresses, and **CIDR** notation.
 ```
        C8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DCb
-      dD                d8888b. .d8888.  .o88b.  .d8b.  d8b   db                Cb            
-     d8'                88  `8D 88'  YP d8P  Y8 d8' `8b 888o  88                `8b           
-    d8'                 88oodD' `8bo.   8P      88ooo88 88V8o 88                 `8b          
-   d8'                  88~~~     `Y8b. 8b      88~~~88 88 V8o88                  `8b         
-  d8'                   88      db   8D Y8b  d8 88   88 88  V888                   `8b        
- C8'                    88      `8888Y'  `Y88P' YP   YP VP   V8P                    `8D       
-C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888D 
+      dD                d8888b. .d8888.  .o88b.  .d8b.  d8b   db                Cb
+     d8'                88  `8D 88'  YP d8P  Y8 d8' `8b 888o  88                `8b
+    d8'                 88oodD' `8bo.   8P      88ooo88 88V8o 88                 `8b
+   d8'                  88~~~     `Y8b. 8b      88~~~88 88 V8o88                  `8b
+  d8'                   88      db   8D Y8b  d8 88   88 88  V888                   `8b
+ C8'                    88      `8888Y'  `Y88P' YP   YP VP   V8P                    `8D
+C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888D
 ```
 
 ## Features

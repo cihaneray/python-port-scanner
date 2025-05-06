@@ -234,7 +234,7 @@ Place this file in the same directory as the script or specify a custom path wit
 
 ## Legal Disclaimer
 
-This tool is provided for educational and legitimate network administration purposes only. Unauthorized port scanning may violate the terms of service of networks or service providers. Always ensure you have permission to scan the target systems.
+*This tool is provided for educational and legitimate network administration purposes only. Unauthorized port scanning may violate the terms of service of networks or service providers. Always ensure you have permission to scan the target systems.*
 
 ## License
 

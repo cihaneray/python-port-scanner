@@ -251,3 +251,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [ ] OS Fingerprinting
 - [ ] Enhanced Reliability for UDP Scanning
 - [ ] Vulnerability Detection
+- [ ] (Uncertain) ML Based OS Fingerprinting

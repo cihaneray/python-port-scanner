@@ -248,6 +248,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [x] UDP Scanning
 - [x] Service Version Detection
 - [ ] IPv6 Support
-- [ ] OS Fingerprinting
+- [ ] OS Fingerprinting (Added but not reliable)
 - [ ] Enhanced Reliability for UDP Scanning
 - [ ] Vulnerability Detection
+- [ ] (Uncertain) ML Based OS Fingerprinting

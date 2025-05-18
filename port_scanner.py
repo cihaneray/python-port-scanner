@@ -8,16 +8,17 @@ import socket
 import sys
 import threading
 import time
+import re
 
 from argparse import ArgumentParser, Namespace
 from queue import Queue, Empty
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from modules.service_prober import ServiceProber
 
 # For SYN and UDP scanning
 SCAPY_AVAILABLE = False
 try:
-    from scapy.all import IP, TCP, UDP, ICMP, sr1, conf
+    from scapy.all import IP, IPv6, TCP, UDP, ICMP, ICMPv6EchoRequest, sr1, conf
 
     SCAPY_AVAILABLE = True
 except ImportError:
@@ -55,35 +56,16 @@ class PortScanner:
             print("Error: Timeout must be greater than 0")
             sys.exit(1)
 
-        # Check if SYN scan requires root/admin
-        if self.args.syn and not self._is_root():
-            print("Error: SYN scanning requires root/administrator privileges")
-            sys.exit(1)
+        # Check if SYN scan is available
+        if self.args.syn:
+            self._is_scan_available('SYN')
 
         # Check if UDP scan is available
         if self.args.udp:
-            if not self._is_root():
-                print("Error: UDP scanning requires root/administrator privileges")
-                sys.exit(1)
-            if not SCAPY_AVAILABLE:
-                print("Error: UDP scanning requires the 'scapy' library")
-                print("Please install it using: pip install scapy")
-                sys.exit(1)
-
-        # Check if scapy is available for SYN scanning
-        if self.args.syn and not SCAPY_AVAILABLE:
-            print("Error: SYN scanning requires the 'scapy' library")
-            print("Please install it using: pip install scapy")
-            sys.exit(1)
+            self._is_scan_available('UDP')
 
         if self.args.os_detection:
-            if not SCAPY_AVAILABLE:
-                print("Error: OS detection requires the 'scapy' library")
-                print("Please install it using: pip install scapy")
-                sys.exit(1)
-            if not self._is_root():
-                print("Error: OS detection requires root/administrator privileges")
-                sys.exit(1)
+            self._is_scan_available('OS detection')
 
             # Store OS fingerprinting results
             self.os_results = {}
@@ -91,7 +73,16 @@ class PortScanner:
         # Load common ports from config file
         self.common_ports = self.load_port_config()
 
-        print("""
+        # Banner
+        self.print_banner()
+
+        self.scan()
+
+    def print_banner(self) -> None:
+        """Print ASCII art banner for the tool."""
+        if self.args.quiet:
+            return
+        banner = """
 C8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DCbC8888DC8
 dD|                     d8888b. .d8888.  .o88b.  .d8b.  d8b   db                     |Cb
 d8|                     88  `8D 88'  YP d8P  Y8 d8   8b 888o  88                     |8b
@@ -100,14 +91,13 @@ d8|                     88        `Y8b. 8b      88ooo88 88 V8o88                
 d8|                     88      db   8D Y8b  d8 88   88 88  V888                     |8b
 d8|                     88      `8888Y'  `Y88P' YP   YP VP   V8P                     |8D
 C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888D
-""")
-
-        self.scan()
+"""
+        print(banner)
 
     @staticmethod
     def parse_arguments() -> Namespace:
-        parser = ArgumentParser(description='Advanced TCP/UDP Port Scanner')
-        parser.add_argument('hosts', help='Host(s) to scan (can be hostname, IP, or CIDR notation)')
+        parser = ArgumentParser(description='Advanced Port Scanner with IPv6 Support')
+        parser.add_argument('hosts', help='Host(s) to scan (can be hostname, IPv4, IPv6, or CIDR notation)')
         parser.add_argument('ports', help='Port range to scan, formatted as start-end or "-" for all ports')
         parser.add_argument('-t', '--threads', type=int, default=50, help='Number of threads to use (default: 50)')
         parser.add_argument('-T', '--timeout', type=float, default=0.5, help='Timeout in seconds (default: 0.5)')
@@ -128,6 +118,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         parser.add_argument('--os-detection', action='store_true', help='Perform OS detection (requires root/admin)')
         parser.add_argument('--os-detection-timeout', type=float, default=1.0,
                             help='Timeout for OS detection probes in seconds (default: 1.0)')
+        parser.add_argument('--ipv6', action='store_true', help='Force IPv6 scanning when possible')
 
         return parser.parse_args()
 
@@ -138,10 +129,22 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             try:
                 import ctypes
                 return ctypes.windll.shell32.IsUserAnAdmin() != 0
-            except:
+            except Exception:
                 return False
         else:  # Unix/Linux/Mac
             return os.geteuid() == 0
+
+    def _is_scan_available(self, scan_type: str) -> None:
+        """Check if the script is running with root/admin privileges and is SCAPY available."""
+        if not self._is_root():
+            print(
+                f"Error: {scan_type + ' scanning' if scan_type in ['SYN', 'UDP'] else scan_type} requires root/administrator privileges")
+            sys.exit(1)
+        if not SCAPY_AVAILABLE:
+            print(
+                f"Error: {scan_type + ' scanning' if scan_type in ['SYN', 'UDP'] else scan_type} requires the 'scapy' library")
+            print("Please install it using: pip install scapy")
+            sys.exit(1)
 
     def load_port_config(self) -> Dict[int, str]:
         """Load port configuration from file or use default."""
@@ -194,79 +197,143 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
     @staticmethod
     def parse_cidr(cidr: str) -> List[str]:
-        """Parse CIDR notation and return list of IPs."""
+        """Parse CIDR notation and return list of IPs (supports both IPv4 and IPv6)."""
         try:
-            return [str(ip) for ip in ipaddress.IPv4Network(cidr, strict=False)]
+            # Check if this is IPv4 or IPv6 CIDR notation
+            if ':' in cidr:  # IPv6
+                return [str(ip) for ip in ipaddress.IPv6Network(cidr, strict=False)]
+            else:  # IPv4
+                return [str(ip) for ip in ipaddress.IPv4Network(cidr, strict=False)]
         except ValueError:
-            # If not CIDR, treat as single host
+            # If not valid CIDR, treat as single host
             return [cidr]
 
-    def resolve_targets(self, host_input: str) -> List[str]:
-        """Resolve target host(s) from input."""
+    def resolve_targets(self, host_input: str) -> List[Tuple[str, bool]]:
+        """
+        Resolve target host(s) from input.
+        Returns a list of tuples (ip_address, is_ipv6)
+        """
         # Check if input is CIDR notation
         if '/' in host_input:
-            return self.parse_cidr(host_input)
+            ips = self.parse_cidr(host_input)
+            return [(ip, ':' in ip) for ip in ips]
 
         # Otherwise, treat as single hostname/IP
         if self.is_ip(host_input):
-            return [host_input]
+            return [(host_input, ':' in host_input)]
         else:
             try:
-                ip = socket.gethostbyname(host_input)
-                return [ip]
+                # Try to resolve hostname to both IPv4 and IPv6
+                ip_list = []
+
+                # Try IPv4 resolution
+                try:
+                    ipv4 = socket.getaddrinfo(host_input, None, socket.AF_INET)[0][4][0]
+                    ip_list.append((ipv4, False))
+                except socket.gaierror:
+                    pass
+
+                # Try IPv6 resolution
+                try:
+                    ipv6 = socket.getaddrinfo(host_input, None, socket.AF_INET6)[0][4][0]
+                    ip_list.append((ipv6, True))
+                except socket.gaierror:
+                    pass
+
+                # If we have both and not specifically requesting IPv6, prefer IPv4
+                if len(ip_list) == 2 and not self.args.ipv6:
+                    return [ip_list[0]]  # Return only IPv4
+
+                # If no addresses found, raise an error
+                if not ip_list:
+                    raise socket.gaierror(f"Could not resolve hostname {host_input}")
+
+                return ip_list
             except socket.gaierror:
                 print(f"Error: Could not resolve hostname {host_input}")
                 sys.exit(1)
 
     @staticmethod
     def is_ip(s: str) -> bool:
-        """Check if string is a valid IP address."""
+        """Check if string is a valid IP address (IPv4 or IPv6)."""
         try:
             ipaddress.ip_address(s)
             return True
         except ValueError:
             return False
 
-    def perform_os_detection(self, target: str) -> dict:
+    def _collect_service_banners(self, target: str) -> Dict[str, Dict[int, str]]:
+        """Collect service banners for OS fingerprinting."""
+        banners = {
+            "tcp": {},
+            "udp": {}
+        }
+
+        # Collect TCP banners
+        for port in self.open_ports.get(target, []):
+            cached_banner = self.service_info_cache.get(f"{target}:{port}:tcp", "")
+            if cached_banner:
+                banners["tcp"][port] = cached_banner
+
+        # Collect UDP banners if available
+        for port in self.open_udp_ports.get(target, []):
+            cached_banner = self.service_info_cache.get(f"{target}:{port}:udp", "")
+            if cached_banner:
+                banners["udp"][port] = cached_banner
+
+        return banners
+
+    def perform_os_detection(self, target: str, is_ipv6: bool) -> dict:
         """Perform OS detection on the target."""
-        # from modules.os_fingerprinter import OSFingerprinter
-        from temp import OSFingerprinter
+        from modules.os_fingerprinter import OSFingerprinter
+
         # Get open ports for this target to improve accuracy
-        open_ports = self.open_ports.get(target)
+        open_ports = self.open_ports.get(target, [])
+
+        # Collect service banners for the target
+        service_banners = self._collect_service_banners(target)
 
         # Create fingerprinter with configured timeout
-        fingerprinter = OSFingerprinter()
+        fingerprinter = OSFingerprinter(timeout=self.args.os_detection_timeout)
 
-        # Perform fingerprinting
-        return fingerprinter.fingerprint_os(target, open_ports)
+        # Perform fingerprinting with banner information
+        return fingerprinter.fingerprint_os(target, open_ports, service_banners)
 
-    def scan(self) -> None:
-        # Parse port range
+    def _parse_port_range(self) -> tuple:
+        """Parse port range."""
         if self.args.ports == '-':
             start_port, end_port = 1, 65535
             port_list = range(1, 65536)
-        else:
-            try:
-                if '-' in self.args.ports:
-                    start_port, end_port = map(int, self.args.ports.split('-'))
-                    port_list = range(start_port, end_port + 1)
-                elif ',' in self.args.ports:
-                    # Handle comma-separated port list
-                    port_list = [int(p) for p in self.args.ports.split(',')]
-                    start_port, end_port = min(port_list), max(port_list)
-                else:
-                    start_port = end_port = int(self.args.ports)
-                    port_list = [start_port]
+            return start_port, end_port, port_list
 
-                if not all(1 <= p <= 65535 for p in [start_port, end_port]):
-                    print("Error: Port numbers must be between 1 and 65535")
-                    sys.exit(1)
-            except ValueError:
-                print("Error: Invalid port format. Use start-end, comma-separated list, or a single port number.")
+        try:
+            if '-' in self.args.ports:
+                start_port, end_port = map(int, self.args.ports.split('-'))
+                port_list = range(start_port, end_port + 1)
+            elif ',' in self.args.ports:
+                # Handle comma-separated port list
+                port_list = [int(p) for p in self.args.ports.split(',')]
+                start_port, end_port = min(port_list), max(port_list)
+            else:
+                start_port = end_port = int(self.args.ports)
+                port_list = [start_port]
+
+            if not all(1 <= p <= 65535 for p in [start_port, end_port]):
+                print("Error: Port numbers must be between 1 and 65535")
                 sys.exit(1)
 
-        # Resolve targets
-        targets = self.resolve_targets(self.args.hosts)
+            return start_port, end_port, port_list
+        except ValueError:
+            print("Error: Invalid port format. Use start-end, comma-separated list, or a single port number.")
+            sys.exit(1)
+
+    def scan(self) -> None:
+        # Parse port range.
+        start_port, end_port, port_list = self._parse_port_range()
+
+        # Resolve targets with IPv6 support
+        target_tuples = self.resolve_targets(self.args.hosts)
+        targets = [ip for ip, _ in target_tuples]
 
         if not targets:
             print("Error: No valid targets to scan")
@@ -289,7 +356,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         if not self.args.quiet:
             scan_types = []
             if not self.args.udp or self.args.syn:  # Default is TCP unless only UDP is specified
-                scan_types.append("SYN" if self.args.syn else "TCP Connect")
+                scan_types.append("SYN" if self.args.syn else "TCP")
             if self.args.udp:
                 scan_types.append("UDP")
 
@@ -314,16 +381,16 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 print(f"Rate limit: {self.rate_limit} packets/second")
             print()
 
-        # Fill the queue with (target, port, protocol) tuples to scan
-        for target in targets:
+        # Fill the queue with (target, port, protocol, is_ipv6) tuples to scan
+        for target, is_ipv6 in target_tuples:
             for port in port_list:
                 # Add TCP scan task unless UDP-only scan is specified
                 if not self.args.udp or self.args.syn:
-                    self.queue.put((target, port, 'tcp'))
+                    self.queue.put((target, port, 'tcp', is_ipv6))
 
                 # Add UDP scan task if UDP scanning is enabled
                 if self.args.udp:
-                    self.queue.put((target, port, 'udp'))
+                    self.queue.put((target, port, 'udp', is_ipv6))
 
         # Start worker threads
         threads = []
@@ -342,13 +409,13 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
         if self.args.os_detection:
             print("Performing OS detection...")
-            for target in targets:
+            for target, is_ipv6 in target_tuples:
                 sys.stdout.write(f"\r  OS detection for {target}...")
                 sys.stdout.flush()
 
                 # Only perform OS detection on hosts with open ports
                 if target in self.open_ports and self.open_ports[target]:
-                    os_result = self.perform_os_detection(target)
+                    os_result = self.perform_os_detection(target, is_ipv6)
                     self.os_results[target] = os_result
                     sys.stdout.write(f"\r  OS detection for {target}: {os_result['os']} "
                                      f"(Confidence: {os_result['confidence']}%)\n")
@@ -384,9 +451,12 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
             self.last_scan_time = time.time()
 
-    def tcp_connect_scan(self, target_ip: str, port: int) -> bool:
+    def tcp_connect_scan(self, target_ip: str, port: int, is_ipv6: bool) -> bool:
         """Test if a port is open using TCP connect scan."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # Choose the appropriate address family
+        addr_family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
+
+        with socket.socket(addr_family, socket.SOCK_STREAM) as sock:
             sock.settimeout(self.args.timeout)
             result = sock.connect_ex((target_ip, port))
             if result == 0:
@@ -395,17 +465,22 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 return True
         return False
 
-    def syn_scan(self, target_ip: str, port: int) -> bool:
-        """Test if a port is open using SYN scan."""
-        if not SCAPY_AVAILABLE:
-            return False
+    def syn_scan(self, target_ip: str, port: int, is_ipv6: bool) -> bool:
+        """Perform scanning with SYN (supports both IPv4 and IPv6)."""
 
         # Disable scapy warnings
         conf.verb = 0
 
-        # Send SYN packet
+        # Randomize the source port for stealth scanning
         src_port = random.randint(1025, 65534)
-        packet = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="S")
+
+        # Choose IPv4 or IPv6 based on target type
+        if is_ipv6:
+            # Create IPv6 SYN packet
+            packet = IPv6(dst=target_ip) / TCP(sport=src_port, dport=port, flags="S")
+        else:
+            # Create IPv4 SYN packet
+            packet = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="S")
 
         # Set timeout and send packet
         response = sr1(packet, timeout=self.args.timeout, verbose=0)
@@ -417,7 +492,11 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             # Check if SYN-ACK (flags=0x12) was received
             if tcp_layer.flags == 0x12:  # SYN-ACK
                 # Send RST to close connection
-                rst = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="R")
+                if is_ipv6:
+                    rst = IPv6(dst=target_ip) / TCP(sport=src_port, dport=port, flags="R")
+                else:
+                    rst = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="R")
+
                 sr1(rst, timeout=1, verbose=0)
 
                 with self.lock:
@@ -426,10 +505,12 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
         return False
 
-    def udp_scan(self, target_ip: str, port: int) -> bool:
-        """Test if a UDP port is open."""
-        if not SCAPY_AVAILABLE:
-            return False
+    def udp_scan(self, target_ip: str, port: int, is_ipv6: bool) -> bool:
+        """ Perform UDP port scanning with retries (supports both IPv4 and IPv6).
+
+        - Returns True if the port is open or unresponsive (open|filtered).
+        - Returns False if ICMP unreachable indicates the port is closed.
+        """
 
         # Disable scapy warnings
         conf.verb = 0
@@ -438,7 +519,11 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         for _ in range(self.args.udp_retry):
             # Send UDP packet with empty payload
             src_port = random.randint(1025, 65534)
-            packet = IP(dst=target_ip) / UDP(sport=src_port, dport=port)
+
+            if is_ipv6:
+                packet = IPv6(dst=target_ip) / UDP(sport=src_port, dport=port)
+            else:
+                packet = IP(dst=target_ip) / UDP(sport=src_port, dport=port)
 
             # Send the packet and wait for response
             response = sr1(packet, timeout=self.args.timeout, verbose=0)
@@ -449,52 +534,70 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 # Continue to next retry
                 continue
 
-            # ICMP unreachable error (type 3) indicates closed port
-            if response.haslayer(ICMP):
-                icmp_type = response.getlayer(ICMP).type
-                icmp_code = response.getlayer(ICMP).code
-
-                if icmp_type == 3 and icmp_code in [1, 2, 3, 9, 10, 13]:
-                    # Port is closed or filtered
+            # Check for ICMP unreachable errors
+            if is_ipv6:
+                # For IPv6, check for ICMPv6 unreachable messages (Type 1)
+                if response.haslayer(ICMPv6EchoRequest) and response.type == 1:
                     return False
+            else:
+                # For IPv4, check for ICMP unreachable messages (Type 3)
+                if response.haslayer(ICMP):
+                    icmp = response.getlayer(ICMP)
+                    if icmp.type == 3 and icmp.code in [1, 2, 3, 9, 10, 13]:
+                        # Port is closed or filtered
+                        return False
 
             # If we got a UDP response, the port is definitely open
-            elif response.haslayer(UDP):
+            if response.haslayer(UDP):
                 with self.lock:
                     self.open_udp_ports[target_ip].append(port)
                 return True
 
         # If we've reached here without a definitive answer, we'll consider it potentially open
-        # This is where UDP scanning is more complex than TCP - we can't be certain
         with self.lock:
             self.open_udp_ports[target_ip].append(port)
         return True
 
-    def grab_banner(self, ip: str, port: int, protocol: str = 'tcp') -> str:
+    def grab_banner(self, ip: str, port: int, protocol: str = 'tcp', is_ipv6: bool = False) -> str:
         """Attempt to grab service banner from open port with enhanced detection."""
         if not self.args.banner and not self.args.version_detection:
             return ""
 
+        # Check cache first to avoid redundant probes
+        cache_key = f"{ip}:{port}:{protocol}"
+        if cache_key in self.service_info_cache:
+            return self.service_info_cache[cache_key]
+
+        # Standardize timeout handling
+        effective_timeout = max(2.0, self.args.timeout)
+
         if protocol == 'udp':  # Basic handling for UDP
             if self.args.version_detection:
-                prober = ServiceProber(timeout=max(2.0, self.args.timeout),
+                prober = ServiceProber(timeout=effective_timeout,
                                        intensity=self.args.version_intensity)
-                return prober.detect_udp_service(port)
+                result = prober.detect_udp_service(ip, port)
+                if result:
+                    self.service_info_cache[cache_key] = result
+                    return result
             return ""
 
         # For TCP ports with version detection
         if self.args.version_detection:
-            prober = ServiceProber(timeout=max(2.0, self.args.timeout),
+            prober = ServiceProber(timeout=effective_timeout,
                                    intensity=self.args.version_intensity)
             version = prober.detect_service_version(ip, port, protocol)
             if version:
+                self.service_info_cache[cache_key] = version
                 return version
 
         # Fall back to regular banner grabbing if version detection failed or not enabled
         if self.args.banner:
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(max(2.0, self.args.timeout))
+                # Determine socket family based on IP type
+                socket_family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
+
+                with socket.socket(socket_family, socket.SOCK_STREAM) as s:
+                    s.settimeout(effective_timeout)
                     s.connect((ip, port))
 
                     # Try common protocols based on port
@@ -514,10 +617,27 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                         s.send(b"\r\n\r\n")
 
                     try:
-                        return s.recv(1024).decode('utf-8', errors='ignore').strip()[:75]  # Increased to 75 chars
+                        banner = s.recv(1024).decode('utf-8', errors='ignore').strip()
+                        # Sanitize and limit banner length
+                        banner = re.sub(r'[\x00-\x1F\x7F]', '', banner)
+                        from html import escape
+                        result = escape(banner)[:75]  # Use consistent max length of 75 chars
+                        self.service_info_cache[cache_key] = result
+                        return result
                     except socket.timeout:
-                        return "Connection established, no response"
-            except (socket.error, socket.timeout):
+                        result = "Connection established, no response"
+                        self.service_info_cache[cache_key] = result
+                        return result
+            except (socket.error, socket.timeout) as e:
+                # Log the specific error for debugging
+                if self.args.verbose:
+                    print(f"Error grabbing banner from {ip}:{port}: {str(e)}")
+
+                # Check if the port closes immediately after connection
+                if "refused" in str(e).lower():
+                    result = "Port accepts connections but closes immediately"
+                    self.service_info_cache[cache_key] = result
+                    return result
                 return ""
 
         return ""
@@ -526,7 +646,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         """Worker thread to scan ports."""
         while True:
             try:
-                target_ip, port, protocol = self.queue.get(timeout=1)
+                target_ip, port, protocol, is_ipv6 = self.queue.get(timeout=1)
             except Empty:
                 break
 
@@ -539,17 +659,17 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 # Choose scan method based on protocol and args
                 if protocol == 'tcp':
                     if self.args.syn:
-                        is_open = self.syn_scan(target_ip, port)
+                        is_open = self.syn_scan(target_ip, port, is_ipv6)
                     else:
-                        is_open = self.tcp_connect_scan(target_ip, port)
+                        is_open = self.tcp_connect_scan(target_ip, port, is_ipv6)
                 elif protocol == 'udp':
-                    is_open = self.udp_scan(target_ip, port)
+                    is_open = self.udp_scan(target_ip, port, is_ipv6)
 
                 # If port is open and banner grabbing or version detection is enabled
                 if is_open:
                     service_info = ""
                     if self.args.banner or self.args.version_detection:
-                        service_info = self.grab_banner(target_ip, port, protocol)
+                        service_info = self.grab_banner(target_ip, port, protocol, is_ipv6)
 
                     if service_info and self.args.verbose:
                         with self.lock:
@@ -561,7 +681,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                     # If we're doing SYN scanning with version detection, we need to re-establish a full connection
                     if self.args.syn and self.args.version_detection and not service_info and protocol == 'tcp':
                         # Try to connect and get version info
-                        service_info = self.grab_banner(target_ip, port, protocol)
+                        service_info = self.grab_banner(target_ip, port, protocol, is_ipv6)
             except (socket.error, socket.timeout):
                 pass
 
@@ -600,11 +720,13 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         # Determine scan types used
         scan_types = []
         if not self.args.udp or self.args.syn:  # Default is TCP unless only UDP is specified
-            scan_types.append("SYN" if self.args.syn else "TCP Connect")
+            scan_types.append("SYN" if self.args.syn else "TCP")
         if self.args.udp:
             scan_types.append("UDP")
         if self.args.version_detection:
             scan_types.append("Version Detection")
+        if self.args.ipv6:
+            scan_types.append("IPv6")
         return " and ".join(scan_types)
 
     def print_results(self, targets: List[str]) -> None:
@@ -633,61 +755,65 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
             has_open_ports = bool(tcp_open_ports or udp_open_ports)
 
-            if has_open_ports:
-                print(f"Target: {target}")
-                print(f"Open ports: {len(tcp_open_ports) + len(udp_open_ports)} "
-                      f"(TCP: {len(tcp_open_ports)}, UDP: {len(udp_open_ports)})")
+            # Format target display with square brackets for IPv6 addresses
+            display_target = f"[{target}]" if ':' in target else target
 
-                if self.args.os_detection and target in self.os_results:
-                    os_info = self.os_results[target]
-                    print(f"OS Detection: {os_info['os']} (Confidence: {os_info['confidence']}%)")
-                    if self.args.verbose and 'reason' in os_info:
-                        print(f"Detection method: {os_info['reason']}")
-                    print()
+            print(f"Target: {display_target}")
+            if not has_open_ports:
+                if not self.args.quiet:
+                    print("No open ports found.\n")
+                continue  # If there are no open ports, finish this target.
 
-                # Display TCP ports if any
-                if tcp_open_ports:
-                    print("\nTCP PORTS:")
-                    header = "PORT     SERVICE"
-                    if self.args.version_detection:
-                        header += "         VERSION"
-                    elif self.args.banner:
-                        header += "         BANNER"
-                    print(header)
-                    print("-" * (max(20, len(header))))
+            print(f"Open ports: {len(tcp_open_ports) + len(udp_open_ports)} "
+                  f"(TCP: {len(tcp_open_ports)}, UDP: {len(udp_open_ports)})")
 
-                    for port in tcp_open_ports:
-                        service = self.get_service_name(port)
-                        if self.args.version_detection or self.args.banner:
-                            version_info = self.grab_banner(target, port)
-                            version_display = version_info[:60] + "..." if len(version_info) > 60 else version_info
-                            version_clean = version_display.replace('\r', '').replace('\n', ' ')
-                            print(f"{port:<8} {service:<12} {version_clean}")
-                        else:
-                            print(f"{port:<8} {service}")
-
-                # Display UDP ports if any with version detection
-                if udp_open_ports:
-                    print("\nUDP PORTS:")
-                    header = "PORT     SERVICE"
-                    if self.args.version_detection:
-                        header += "         VERSION"
-                    print(header)
-                    print("-" * (max(20, len(header))))
-
-                    for port in udp_open_ports:
-                        service = self.get_service_name(port)
-                        if self.args.version_detection:
-                            version_info = self.grab_banner(target, port, 'udp')
-                            version_clean = version_info.replace('\r', '').replace('\n', ' ')
-                            print(f"{port:<8} {service:<12} {version_clean}")
-                        else:
-                            print(f"{port:<8} {service}")
-
+            if self.args.os_detection and (target in self.os_results):
+                os_info = self.os_results[target]
+                print(f"OS Detection: {os_info['os']} (Confidence: {os_info['confidence']}%)")
+                if self.args.verbose and ('reason' in os_info):
+                    print(f"Detection method: {os_info['reason']}")
                 print()
-            elif not self.args.quiet:
-                print(f"Target: {target}")
-                print("No open ports found.\n")
+
+            # Display TCP ports if any
+            if tcp_open_ports:
+                print("\nTCP PORTS:")
+                header = "PORT     SERVICE"
+                if self.args.version_detection:
+                    header += "         VERSION"
+                elif self.args.banner:
+                    header += "         BANNER"
+                print(header)
+                print("-" * (max(20, len(header))))
+
+                for port in tcp_open_ports:
+                    service = self.get_service_name(port)
+                    if self.args.version_detection or self.args.banner:
+                        version_info = self.grab_banner(target, port, is_ipv6=(':' in target))
+                        version_display = version_info[:60] + "..." if len(version_info) > 60 else version_info
+                        version_clean = version_display.replace('\r', '').replace('\n', ' ')
+                        print(f"{port:<8} {service:<12} {version_clean}")
+                    else:
+                        print(f"{port:<8} {service}")
+
+            # Display UDP ports if any with version detection
+            if udp_open_ports:
+                print("\nUDP PORTS:")
+                header = "PORT     SERVICE"
+                if self.args.version_detection:
+                    header += "         VERSION"
+                print(header)
+                print("-" * (max(20, len(header))))
+
+                for port in udp_open_ports:
+                    service = self.get_service_name(port)
+                    if self.args.version_detection:
+                        version_info = self.grab_banner(target, port, 'udp', is_ipv6=(':' in target))
+                        version_clean = version_info.replace('\r', '').replace('\n', ' ')
+                        print(f"{port:<8} {service:<12} {version_clean}")
+                    else:
+                        print(f"{port:<8} {service}")
+
+            print()
 
     def save_results(self, targets: List[str]) -> None:
         """Save scan results to a file with version detection info."""
@@ -707,7 +833,10 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 f.write(f"Total open ports found: {total_open} (TCP: {total_tcp_open}, UDP: {total_udp_open})\n\n")
 
                 for target in targets:
-                    if self.args.os_detection and target in self.os_results:
+                    # Format target display with square brackets for IPv6 addresses
+                    display_target = f"[{target}]" if ':' in target else target
+
+                    if self.args.os_detection and (target in self.os_results):
                         os_info = self.os_results[target]
                         f.write(f"OS Detection: {os_info['os']} (Confidence: {os_info['confidence']}%)\n")
                         if 'reason' in os_info:
@@ -722,52 +851,55 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
                     has_open_ports = bool(tcp_open_ports or udp_open_ports)
 
-                    f.write(f"Target: {target}\n")
-                    if has_open_ports:
-                        f.write(f"Open ports: {len(tcp_open_ports) + len(udp_open_ports)} "
-                                f"(TCP: {len(tcp_open_ports)}, UDP: {len(udp_open_ports)})\n")
+                    f.write(f"Target: {display_target}\n")
 
-                        # Write TCP ports if any
-                        if tcp_open_ports:
-                            f.write("\nTCP PORTS:\n")
-                            header = "PORT     SERVICE"
-                            if self.args.version_detection:
-                                header += "         VERSION"
-                            elif self.args.banner:
-                                header += "         BANNER"
-                            f.write(header + "\n")
-                            f.write("-" * (max(20, len(header))) + "\n")
-
-                            for port in tcp_open_ports:
-                                service = self.get_service_name(port)
-                                if self.args.version_detection or self.args.banner:
-                                    version_info = self.grab_banner(target, port)
-                                    version_display = version_info[:60] + "..." if len(
-                                        version_info) > 60 else version_info
-                                    version_clean = version_display.replace('\r', '').replace('\n', ' ')
-                                    f.write(f"{port:<8} {service:<12} {version_clean}\n")
-                                else:
-                                    f.write(f"{port:<8} {service}\n")
-
-                        # Write UDP ports if any
-                        if udp_open_ports:
-                            f.write("\nUDP PORTS:\n")
-                            header = "PORT     SERVICE"
-                            if self.args.version_detection:
-                                header += "         VERSION"
-                            f.write(header + "\n")
-                            f.write("-" * (max(20, len(header))) + "\n")
-
-                            for port in udp_open_ports:
-                                service = self.get_service_name(port)
-                                if self.args.version_detection:
-                                    version_info = self.grab_banner(target, port, 'udp')
-                                    version_clean = version_info.replace('\r', '').replace('\n', ' ')
-                                    f.write(f"{port:<8} {service:<12} {version_clean}\n")
-                                else:
-                                    f.write(f"{port:<8} {service}\n")
-                    else:
+                    if not has_open_ports:
                         f.write("No open ports found.\n")
+                        f.write("\n")
+                        continue  # If there are no open ports, finish this target.
+
+                    f.write(f"Open ports: {len(tcp_open_ports) + len(udp_open_ports)} "
+                            f"(TCP: {len(tcp_open_ports)}, UDP: {len(udp_open_ports)})\n")
+
+                    # Write TCP ports if any
+                    if tcp_open_ports:
+                        f.write("\nTCP PORTS:\n")
+                        header = "PORT     SERVICE"
+                        if self.args.version_detection:
+                            header += "         VERSION"
+                        elif self.args.banner:
+                            header += "         BANNER"
+                        f.write(header + "\n")
+                        f.write("-" * (max(20, len(header))) + "\n")
+
+                        for port in tcp_open_ports:
+                            service = self.get_service_name(port)
+                            if self.args.version_detection or self.args.banner:
+                                version_info = self.grab_banner(target, port, is_ipv6=(':' in target))
+                                version_display = version_info[:60] + "..." if len(
+                                    version_info) > 60 else version_info
+                                version_clean = version_display.replace('\r', '').replace('\n', ' ')
+                                f.write(f"{port:<8} {service:<12} {version_clean}\n")
+                            else:
+                                f.write(f"{port:<8} {service}\n")
+
+                    # Write UDP ports if any
+                    if udp_open_ports:
+                        f.write("\nUDP PORTS:\n")
+                        header = "PORT     SERVICE"
+                        if self.args.version_detection:
+                            header += "         VERSION"
+                        f.write(header + "\n")
+                        f.write("-" * (max(20, len(header))) + "\n")
+
+                        for port in udp_open_ports:
+                            service = self.get_service_name(port)
+                            if self.args.version_detection:
+                                version_info = self.grab_banner(target, port, 'udp', is_ipv6=(':' in target))
+                                version_clean = version_info.replace('\r', '').replace('\n', ' ')
+                                f.write(f"{port:<8} {service:<12} {version_clean}\n")
+                            else:
+                                f.write(f"{port:<8} {service}\n")
                     f.write("\n")
 
             print(f"\nResults saved to {self.args.output}")
@@ -789,7 +921,8 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                     "total_open": sum(len(ports) for ports in self.open_ports.values()) +
                                   (sum(len(ports) for ports in self.open_udp_ports.values()) if self.args.udp else 0)
                 },
-                "targets": {}
+                "targets": {
+                }
             }
 
             for target in targets:
@@ -801,11 +934,12 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
                 target_data = {
                     "ip": target,
+                    "ip_type": "ipv6" if ':' in target else "ipv4",
                     "tcp_ports": [],
                     "udp_ports": [] if self.args.udp else None
                 }
 
-                if self.args.os_detection and target in self.os_results:
+                if self.args.os_detection and (target in self.os_results):
                     target_data["os_detection"] = self.os_results[target]
 
                 # Add TCP ports
@@ -817,10 +951,10 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                     }
 
                     if self.args.version_detection:
-                        version_info = self.grab_banner(target, port)
+                        version_info = self.grab_banner(target, port, is_ipv6=(':' in target))
                         port_data["version"] = version_info
                     elif self.args.banner:
-                        banner = self.grab_banner(target, port)
+                        banner = self.grab_banner(target, port, is_ipv6=(':' in target))
                         port_data["banner"] = banner
 
                     target_data["tcp_ports"].append(port_data)
@@ -835,7 +969,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                         }
 
                         if self.args.version_detection:
-                            version_info = self.grab_banner(target, port, 'udp')
+                            version_info = self.grab_banner(target, port, 'udp', is_ipv6=(':' in target))
                             port_data["version"] = version_info
 
                         target_data["udp_ports"].append(port_data)

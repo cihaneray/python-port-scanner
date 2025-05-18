@@ -297,7 +297,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         fingerprinter = OSFingerprinter(timeout=self.args.os_detection_timeout)
 
         # Perform fingerprinting with banner information
-        return fingerprinter.fingerprint_os(target, open_ports, service_banners)
+        return fingerprinter.fingerprint_os(target, open_ports, service_banners, is_ipv6)
 
     def _parse_port_range(self) -> tuple:
         """Parse port range."""
@@ -682,6 +682,9 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                     if self.args.syn and self.args.version_detection and not service_info and protocol == 'tcp':
                         # Try to connect and get version info
                         service_info = self.grab_banner(target_ip, port, protocol, is_ipv6)
+                        if service_info and self.args.verbose:
+                            with self.lock:
+                                print(f"\nFound open {protocol.upper()} port {port} on {target_ip} - {service_info}")
             except (socket.error, socket.timeout):
                 pass
 

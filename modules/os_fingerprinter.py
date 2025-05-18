@@ -5,9 +5,8 @@ Performs OS detection based on TCP/IP stack behavior with IPv6 support.
 Incorporates service banner information for improved accuracy.
 """
 import logging
-import socket
 import re
-from typing import List, Dict, Tuple, Any, Optional, Union
+from typing import List, Dict, Tuple, Any, Optional
 
 try:
     from scapy.all import IP, IPv6, TCP, UDP, ICMP, ICMPv6EchoRequest, ICMPv6EchoReply, sr1, RandShort, conf
@@ -398,7 +397,8 @@ class OSFingerprinter:
         }
 
     def fingerprint_os(self, target_ip: str, open_ports: Optional[List[int]] = None,
-                       service_banners: Optional[Dict[str, Dict[int, str]]] = None) -> Dict[str, Any]:
+                           service_banners: Optional[Dict[str, Dict[int, str]]] = None,
+                           is_ipv6: Optional[bool] = None) -> Dict[str, Any]:
         """
         Fingerprint the OS of the target IP using multiple TCP/IP stack probes and service banners.
         Supports both IPv4 and IPv6 addresses.
@@ -416,7 +416,7 @@ class OSFingerprinter:
 
         self.target_ip = target_ip
         self.open_ports = open_ports or []
-        self.is_ipv6 = ':' in target_ip  # Check if IPv6 address
+        self.is_ipv6 = is_ipv6 if is_ipv6 is not None else ':' in target_ip
         self.service_banners = service_banners or {}
 
         # First check if we have banner information that can definitively identify the OS
@@ -528,7 +528,7 @@ class OSFingerprinter:
 
         # Process any other protocol banners here
 
-        # If we have banner results, return the one with highest confidence
+        # If we have banner results, return the one with the highest confidence
         if banner_results:
             return max(banner_results, key=lambda x: x["confidence"])
 
@@ -739,7 +739,8 @@ class OSFingerprinter:
         result["reason"] = "TCP/IP fingerprinting with banner analysis"
         return result
 
-    def _same_os_family(self, os1: str, os2: str) -> bool:
+    @staticmethod
+    def _same_os_family(os1: str, os2: str) -> bool:
         """Check if two OS strings belong to the same OS family."""
         os1_lower = os1.lower()
         os2_lower = os2.lower()
@@ -757,7 +758,8 @@ class OSFingerprinter:
 
         return False
 
-    def _select_probe_ports(self, open_ports: Optional[List[int]]) -> List[int]:
+    @staticmethod
+    def _select_probe_ports(open_ports: Optional[List[int]]) -> List[int]:
         """
         Select appropriate ports for probing based on open ports found.
         Prioritizes common service ports.
@@ -1180,7 +1182,7 @@ class OSFingerprinter:
             os_votes[os_name] = os_votes.get(os_name, 0) + confidence
 
         if os_votes:
-            # Find the OS with highest confidence
+            # Find the OS with the highest confidence
             most_likely_os_name, highest_confidence = max(os_votes.items(), key=lambda x: x[1])
 
             # Calculate overall confidence percentage

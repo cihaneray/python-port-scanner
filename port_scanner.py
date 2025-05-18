@@ -75,7 +75,7 @@ class PortScanner:
             print("Error: SYN scanning requires the 'scapy' library")
             print("Please install it using: pip install scapy")
             sys.exit(1)
-            
+
         if self.args.os_detection:
             if not SCAPY_AVAILABLE:
                 print("Error: OS detection requires the 'scapy' library")
@@ -92,14 +92,14 @@ class PortScanner:
         self.common_ports = self.load_port_config()
 
         print("""
-           C8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DCb
-          dD                d8888b. .d8888.  .o88b.  .d8b.  d8b   db                Cb            
-         d8'                88  `8D 88'  YP d8P  Y8 d8' `8b 888o  88                `8b           
-        d8'                 88oodD' `8bo.   8P      88ooo88 88V8o 88                 `8b          
-       d8'                  88~~~     `Y8b. 8b      88~~~88 88 V8o88                  `8b         
-      d8'                   88      db   8D Y8b  d8 88   88 88  V888                   `8b        
-     C8'                    88      `8888Y'  `Y88P' YP   YP VP   V8P                    `8D       
-    C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888D 
+C8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DCbC8888DC8
+dD|                     d8888b. .d8888.  .o88b.  .d8b.  d8b   db                     |Cb
+d8|                     88  `8D 88'  YP d8P  Y8 d8   8b 888o  88                     |8b
+d8|                     88oodD' `8bo.   8P      88   88 88V8o 88                     |8b
+d8|                     88        `Y8b. 8b      88ooo88 88 V8o88                     |8b
+d8|                     88      db   8D Y8b  d8 88   88 88  V888                     |8b
+d8|                     88      `8888Y'  `Y88P' YP   YP VP   V8P                     |8D
+C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888D
 """)
 
         self.scan()
@@ -229,13 +229,13 @@ class PortScanner:
 
     def perform_os_detection(self, target: str) -> dict:
         """Perform OS detection on the target."""
-        from modules.os_fingerprinter import OSFingerprinter
-
+        # from modules.os_fingerprinter import OSFingerprinter
+        from temp import OSFingerprinter
         # Get open ports for this target to improve accuracy
         open_ports = self.open_ports.get(target)
 
         # Create fingerprinter with configured timeout
-        fingerprinter = OSFingerprinter(timeout=self.args.os_detection_timeout)
+        fingerprinter = OSFingerprinter()
 
         # Perform fingerprinting
         return fingerprinter.fingerprint_os(target, open_ports)

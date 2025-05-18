@@ -4,6 +4,8 @@ import re
 import socket
 import ssl
 import logging
+import threading
+from html import escape
 
 
 class ServiceProber:
@@ -16,6 +18,10 @@ class ServiceProber:
         Args:
             timeout (float): Socket timeout in seconds
             intensity (int): Probe intensity level (0-9)
+                0: Minimal probing - only first probe per service
+                1-3: Low intensity - few probes with longer timeouts
+                4-6: Medium intensity - standard probes for common services
+                7-9: High intensity - aggressive probing with multiple attempts
             log_level (int): Logging level for errors and warnings
         """
         self.timeout = timeout
@@ -28,8 +34,12 @@ class ServiceProber:
         )
         self.logger = logging.getLogger('ServiceProber')
 
-        # Cache for service probes to avoid redundant network calls
+        # Thread-safe cache for service probes to avoid redundant network calls
         self.service_cache = {}
+        self.cache_lock = threading.Lock()
+
+        # Maximum length for service banners
+        self.banner_max_length = 75
 
         # Protocol-specific probes - each is a tuple of (probe_data, response_pattern, version_extract_regex)
         self.probes = {
@@ -122,7 +132,7 @@ class ServiceProber:
             8080: 'http', 8443: 'https', 27017: 'mongodb'
         }
 
-    def get_protocol_for_port(self, port):
+    def _get_protocol_for_port(self, port):
         """
         Determine likely protocol based on port number.
 
@@ -148,26 +158,30 @@ class ServiceProber:
         """
         # Check cache first to avoid unnecessary network calls
         cache_key = f"{ip}:{port}:{protocol}"
-        if cache_key in self.service_cache:
-            return self.service_cache[cache_key]
+
+        with self.cache_lock:
+            if cache_key in self.service_cache:
+                return self.service_cache[cache_key]
 
         try:
             if protocol == 'udp':
                 # UDP service detection needs actual probing
                 result = self.detect_udp_service(ip, port)
                 if result:
-                    self.service_cache[cache_key] = result
+                    with self.cache_lock:
+                        self.service_cache[cache_key] = result
                     return result
                 return None
 
             # For TCP, we'll use our probe data
-            service_protocol = self.get_protocol_for_port(port)
+            service_protocol = self._get_protocol_for_port(port)
 
             # Special handling for HTTPS
             if service_protocol == 'https':
                 result = self.probe_https(ip, port)
                 if result:
-                    self.service_cache[cache_key] = result
+                    with self.cache_lock:
+                        self.service_cache[cache_key] = result
                     return result
                 return None
 
@@ -179,29 +193,129 @@ class ServiceProber:
             if not active_probes:
                 active_probes = self.probes['default'][:probe_count]
 
-            # Try each probe
-            for probe_data, response_pattern, regex_pattern in active_probes:
-                result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
-                if result:
-                    self.service_cache[cache_key] = result
-                    return result
+            # Connection reuse for multiple probes
+            try:
+                # Determine if IPv4 or IPv6 address
+                socket_family = socket.AF_INET6 if ':' in ip else socket.AF_INET
+
+                with socket.socket(socket_family, socket.SOCK_STREAM) as s:
+                    s.settimeout(self.timeout)
+                    try:
+                        self.logger.debug(f"Connecting to {ip}:{port}")
+                        s.connect((ip, port))
+                    except socket.error as e:
+                        self.logger.debug(f"Connection to {ip}:{port} failed: {str(e)}")
+                        # Check if port closes immediately (connection refused)
+                        if "refused" in str(e).lower():
+                            with self.cache_lock:
+                                self.service_cache[
+                                    cache_key] = f"Port {port} accepts connections but closes immediately"
+                            return self.service_cache[cache_key]
+                        return None
+
+                    # Try each probe with the same connection if possible
+                    for i, (probe_data, response_pattern, regex_pattern) in enumerate(active_probes):
+                        try:
+                            if i > 0:  # For probes after the first one, we need a new connection
+                                s.close()
+                                s = socket.socket(socket_family, socket.SOCK_STREAM)
+                                s.settimeout(self.timeout)
+                                s.connect((ip, port))
+
+                            if probe_data:  # Some probes just listen without sending
+                                self.logger.debug(f"Sending probe to {ip}:{port}")
+                                s.send(probe_data)
+
+                            # Receive data
+                            response = b""
+                            try:
+                                response = s.recv(4096)
+                                self.logger.debug(f"Received {len(response)} bytes from {ip}:{port}")
+                            except socket.timeout:
+                                self.logger.debug(f"Socket timeout waiting for response from {ip}:{port}")
+                                pass
+
+                            # If we're looking for a specific pattern and don't find it, continue
+                            if response_pattern and response_pattern not in response:
+                                continue
+
+                            # Extract version using regex if provided
+                            if regex_pattern and regex_pattern != r"":
+                                try:
+                                    match = re.search(regex_pattern, response.decode('utf-8', errors='replace'))
+                                    if match:
+                                        result = self.sanitize_response(match.group(1).strip())
+                                        with self.cache_lock:
+                                            self.service_cache[cache_key] = result
+                                        return result
+                                except Exception as e:
+                                    self.logger.warning(f"Error extracting regex from response: {str(e)}")
+
+                            # If we received a response but couldn't extract a version, return a generic message
+                            if response:
+                                try:
+                                    # Return first line of response, cleaned up
+                                    first_line = response.decode('utf-8', errors='replace').split('\n')[0].strip()
+                                    if first_line:
+                                        result = self.sanitize_response(first_line[:self.banner_max_length])
+                                        with self.cache_lock:
+                                            self.service_cache[cache_key] = result
+                                        return result
+                                except Exception as e:
+                                    self.logger.warning(f"Error processing response: {str(e)}")
+                        except socket.error:
+                            # If a particular probe fails, try the next one
+                            continue
+            except Exception as e:
+                self.logger.warning(f"Error during connection reuse: {str(e)}")
+                # Fall back to individual connections for each probe if reuse fails
+                for probe_data, response_pattern, regex_pattern in active_probes:
+                    result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
+                    if result:
+                        with self.cache_lock:
+                            self.service_cache[cache_key] = result
+                        return result
 
             # Try default probes as a fallback
             if service_protocol != 'default':
                 for probe_data, response_pattern, regex_pattern in self.probes['default'][:2]:
                     result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
                     if result:
-                        self.service_cache[cache_key] = result
+                        with self.cache_lock:
+                            self.service_cache[cache_key] = result
                         return result
 
             # Cache and return generic message as fallback
             result = f"Unknown service on port {port}"
-            self.service_cache[cache_key] = result
+            with self.cache_lock:
+                self.service_cache[cache_key] = result
             return result
 
         except Exception as e:
             self.logger.error(f"Error detecting service on {ip}:{port}: {str(e)}")
             return None
+
+    def sanitize_response(self, response_text):
+        """
+        Sanitize service response to prevent injection issues.
+
+        Args:
+            response_text (str): Raw response text
+
+        Returns:
+            str: Sanitized response
+        """
+        if not response_text:
+            return ""
+
+        # Remove control characters
+        sanitized = re.sub(r'[\x00-\x1F\x7F]', '', response_text)
+
+        # HTML escape to prevent XSS if displayed in web interfaces
+        sanitized = escape(sanitized)
+
+        # Truncate to maximum length
+        return sanitized[:self.banner_max_length]
 
     def send_probe(self, ip, port, probe_data, response_pattern, regex_pattern):
         """
@@ -218,7 +332,10 @@ class ServiceProber:
             str: Service version info or None if not detected
         """
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # Determine if IPv4 or IPv6 address
+            socket_family = socket.AF_INET6 if ':' in ip else socket.AF_INET
+
+            with socket.socket(socket_family, socket.SOCK_STREAM) as s:
                 s.settimeout(self.timeout)
                 self.logger.debug(f"Connecting to {ip}:{port}")
                 s.connect((ip, port))
@@ -245,7 +362,7 @@ class ServiceProber:
                     try:
                         match = re.search(regex_pattern, response.decode('utf-8', errors='replace'))
                         if match:
-                            return match.group(1).strip()
+                            return self.sanitize_response(match.group(1).strip())
                     except Exception as e:
                         self.logger.warning(f"Error extracting regex from response: {str(e)}")
 
@@ -255,13 +372,16 @@ class ServiceProber:
                         # Return first line of response, cleaned up
                         first_line = response.decode('utf-8', errors='replace').split('\n')[0].strip()
                         if first_line:
-                            return first_line[:50]  # Limit length
+                            return self.sanitize_response(first_line[:self.banner_max_length])
                     except Exception as e:
                         self.logger.warning(f"Error processing response: {str(e)}")
 
             return None
         except (socket.error, socket.timeout) as e:
             self.logger.debug(f"Socket error when probing {ip}:{port}: {str(e)}")
+            # Check if the port closes immediately after connection
+            if "refused" in str(e).lower():
+                return f"Port {port} accepts connections but closes immediately"
             return None
         except Exception as e:
             self.logger.warning(f"Unexpected error when probing {ip}:{port}: {str(e)}")
@@ -279,11 +399,17 @@ class ServiceProber:
             str: HTTPS service info or None if detection failed
         """
         try:
-            context = ssl.create_default_context()
+            # Enhanced TLS context configuration
+            context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
+            context.options |= ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3  # Disable insecure protocols
 
-            with socket.create_connection((ip, port), timeout=self.timeout) as sock:
+            # Determine if IPv4 or IPv6 address
+            socket_family = socket.AF_INET6 if ':' in ip else socket.AF_INET
+
+            with socket.socket(socket_family, socket.SOCK_STREAM) as sock:
+                sock.settimeout(self.timeout)
                 with context.wrap_socket(sock, server_hostname=ip) as ssock:
                     # Get certificate info and use it if available
                     cert = ssock.getpeercert(binary_form=False)
@@ -293,7 +419,7 @@ class ServiceProber:
                     if cert and 'subject' in cert:
                         for field in cert['subject']:
                             if field[0][0] == 'organizationName':
-                                cert_info = f" - {field[0][1]}"
+                                cert_info = f" - {self.sanitize_response(field[0][1])}"
                                 break
 
                     # Send HTTP request to get server header
@@ -307,7 +433,7 @@ class ServiceProber:
 
                     match = re.search(r"Server: ([^\r\n]+)", response_str)
                     if match:
-                        server_header = match.group(1).strip()
+                        server_header = self.sanitize_response(match.group(1).strip())
 
                     # Format result with both certificate and server info if available
                     if server_header:
@@ -347,12 +473,15 @@ class ServiceProber:
         }
 
         try:
+            # Determine if IPv4 or IPv6 address
+            socket_family = socket.AF_INET6 if ':' in ip else socket.AF_INET
+
             # If we have a specific probe for this port, use it
             if port in udp_services:
                 service_name, probe_data = udp_services[port]
 
                 # Create UDP socket and send probe
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                with socket.socket(socket_family, socket.SOCK_DGRAM) as s:
                     s.settimeout(self.timeout)
                     s.sendto(probe_data, (ip, port))
 
@@ -366,7 +495,7 @@ class ServiceProber:
                         return service_name
 
             # Generic UDP probe
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            with socket.socket(socket_family, socket.SOCK_DGRAM) as s:
                 s.settimeout(self.timeout)
                 # Send a simple probe
                 s.sendto(b"\r\n\r\n", (ip, port))

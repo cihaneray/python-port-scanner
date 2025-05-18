@@ -28,7 +28,7 @@ except ImportError:
 class PortScanner:
     def __init__(self) -> None:
         self.queue: Queue = Queue()
-        self.open_ports: Dict[str, List[int]] = {}
+        self.open_tcp_ports: Dict[str, List[int]] = {}
         self.open_udp_ports: Dict[str, List[int]] = {}  # Track UDP ports separately
         self.lock = threading.Lock()
         self.total_ports = 0
@@ -270,7 +270,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         }
 
         # Collect TCP banners
-        for port in self.open_ports.get(target, []):
+        for port in self.open_tcp_ports.get(target, []):
             cached_banner = self.service_info_cache.get(f"{target}:{port}:tcp", "")
             if cached_banner:
                 banners["tcp"][port] = cached_banner
@@ -288,7 +288,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         from modules.os_fingerprinter import OSFingerprinter
 
         # Get open ports for this target to improve accuracy
-        open_ports = self.open_ports.get(target, [])
+        open_ports = self.open_tcp_ports.get(target, [])
 
         # Collect service banners for the target
         service_banners = self._collect_service_banners(target)
@@ -348,7 +348,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
         # Initialize open ports dictionary for each target
         for target in targets:
-            self.open_ports[target] = []
+            self.open_tcp_ports[target] = []
             if self.args.udp:
                 self.open_udp_ports[target] = []
 
@@ -414,7 +414,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 sys.stdout.flush()
 
                 # Only perform OS detection on hosts with open ports
-                if target in self.open_ports and self.open_ports[target]:
+                if target in self.open_tcp_ports and self.open_tcp_ports[target]:
                     os_result = self.perform_os_detection(target, is_ipv6)
                     self.os_results[target] = os_result
                     sys.stdout.write(f"\r  OS detection for {target}: {os_result['os']} "
@@ -461,7 +461,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             result = sock.connect_ex((target_ip, port))
             if result == 0:
                 with self.lock:
-                    self.open_ports[target_ip].append(port)
+                    self.open_tcp_ports[target_ip].append(port)
                 return True
         return False
 
@@ -500,7 +500,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 sr1(rst, timeout=1, verbose=0)
 
                 with self.lock:
-                    self.open_ports[target_ip].append(port)
+                    self.open_tcp_ports[target_ip].append(port)
                 return True
 
         return False
@@ -737,7 +737,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         elapsed = time.time() - self.start_time
 
         # Calculate total open ports (TCP + UDP)
-        total_tcp_open = sum(len(ports) for ports in self.open_ports.values())
+        total_tcp_open = sum(len(ports) for ports in self.open_tcp_ports.values())
         total_udp_open = sum(len(ports) for ports in self.open_udp_ports.values()) if self.args.udp else 0
         total_open = total_tcp_open + total_udp_open
 
@@ -750,7 +750,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         print(f"Total open ports found: {total_open} (TCP: {total_tcp_open}, UDP: {total_udp_open})\n")
 
         for target in targets:
-            tcp_open_ports = self.open_ports[target]
+            tcp_open_ports = self.open_tcp_ports[target]
             tcp_open_ports.sort()
 
             udp_open_ports = self.open_udp_ports.get(target, []) if self.args.udp else []
@@ -829,7 +829,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 f.write(f"Scan date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"Scanned {len(targets)} hosts and {self.total_ports} total ports\n")
 
-                total_tcp_open = sum(len(ports) for ports in self.open_ports.values())
+                total_tcp_open = sum(len(ports) for ports in self.open_tcp_ports.values())
                 total_udp_open = sum(len(ports) for ports in self.open_udp_ports.values()) if self.args.udp else 0
                 total_open = total_tcp_open + total_udp_open
 
@@ -846,7 +846,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                             f.write(f"Detection method: {os_info['reason']}\n")
                         f.write("\n")
 
-                    tcp_open_ports = self.open_ports[target]
+                    tcp_open_ports = self.open_tcp_ports[target]
                     tcp_open_ports.sort()
 
                     udp_open_ports = self.open_udp_ports.get(target, []) if self.args.udp else []
@@ -921,7 +921,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                     "scan_date": time.strftime('%Y-%m-%d %H:%M:%S'),
                     "hosts_scanned": len(targets),
                     "ports_scanned": self.total_ports,
-                    "total_open": sum(len(ports) for ports in self.open_ports.values()) +
+                    "total_open": sum(len(ports) for ports in self.open_tcp_ports.values()) +
                                   (sum(len(ports) for ports in self.open_udp_ports.values()) if self.args.udp else 0)
                 },
                 "targets": {
@@ -929,7 +929,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             }
 
             for target in targets:
-                tcp_open_ports = self.open_ports[target]
+                tcp_open_ports = self.open_tcp_ports[target]
                 tcp_open_ports.sort()
 
                 udp_open_ports = self.open_udp_ports.get(target, []) if self.args.udp else []

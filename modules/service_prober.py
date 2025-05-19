@@ -166,7 +166,7 @@ class ServiceProber:
         try:
             if protocol == 'udp':
                 # UDP service detection needs actual probing
-                result = self.detect_udp_service(ip, port)
+                result = self._detect_udp_service(ip, port)
                 if result:
                     with self.cache_lock:
                         self.service_cache[cache_key] = result
@@ -178,7 +178,7 @@ class ServiceProber:
 
             # Special handling for HTTPS
             if service_protocol == 'https':
-                result = self.probe_https(ip, port)
+                result = self._probe_https(ip, port)
                 if result:
                     with self.cache_lock:
                         self.service_cache[cache_key] = result
@@ -244,7 +244,7 @@ class ServiceProber:
                                 try:
                                     match = re.search(regex_pattern, response.decode('utf-8', errors='replace'))
                                     if match:
-                                        result = self.sanitize_response(match.group(1).strip())
+                                        result = self._sanitize_response(match.group(1).strip())
                                         with self.cache_lock:
                                             self.service_cache[cache_key] = result
                                         return result
@@ -257,7 +257,7 @@ class ServiceProber:
                                     # Return first line of response, cleaned up
                                     first_line = response.decode('utf-8', errors='replace').split('\n')[0].strip()
                                     if first_line:
-                                        result = self.sanitize_response(first_line[:self.banner_max_length])
+                                        result = self._sanitize_response(first_line[:self.banner_max_length])
                                         with self.cache_lock:
                                             self.service_cache[cache_key] = result
                                         return result
@@ -270,7 +270,7 @@ class ServiceProber:
                 self.logger.warning(f"Error during connection reuse: {str(e)}")
                 # Fall back to individual connections for each probe if reuse fails
                 for probe_data, response_pattern, regex_pattern in active_probes:
-                    result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
+                    result = self._send_probe(ip, port, probe_data, response_pattern, regex_pattern)
                     if result:
                         with self.cache_lock:
                             self.service_cache[cache_key] = result
@@ -279,7 +279,7 @@ class ServiceProber:
             # Try default probes as a fallback
             if service_protocol != 'default':
                 for probe_data, response_pattern, regex_pattern in self.probes['default'][:2]:
-                    result = self.send_probe(ip, port, probe_data, response_pattern, regex_pattern)
+                    result = self._send_probe(ip, port, probe_data, response_pattern, regex_pattern)
                     if result:
                         with self.cache_lock:
                             self.service_cache[cache_key] = result
@@ -295,7 +295,7 @@ class ServiceProber:
             self.logger.error(f"Error detecting service on {ip}:{port}: {str(e)}")
             return None
 
-    def sanitize_response(self, response_text):
+    def _sanitize_response(self, response_text):
         """
         Sanitize service response to prevent injection issues.
 
@@ -317,7 +317,7 @@ class ServiceProber:
         # Truncate to maximum length
         return sanitized[:self.banner_max_length]
 
-    def send_probe(self, ip, port, probe_data, response_pattern, regex_pattern):
+    def _send_probe(self, ip, port, probe_data, response_pattern, regex_pattern):
         """
         Send a probe to the service and analyze the response.
 
@@ -362,7 +362,7 @@ class ServiceProber:
                     try:
                         match = re.search(regex_pattern, response.decode('utf-8', errors='replace'))
                         if match:
-                            return self.sanitize_response(match.group(1).strip())
+                            return self._sanitize_response(match.group(1).strip())
                     except Exception as e:
                         self.logger.warning(f"Error extracting regex from response: {str(e)}")
 
@@ -372,7 +372,7 @@ class ServiceProber:
                         # Return first line of response, cleaned up
                         first_line = response.decode('utf-8', errors='replace').split('\n')[0].strip()
                         if first_line:
-                            return self.sanitize_response(first_line[:self.banner_max_length])
+                            return self._sanitize_response(first_line[:self.banner_max_length])
                     except Exception as e:
                         self.logger.warning(f"Error processing response: {str(e)}")
 
@@ -387,7 +387,7 @@ class ServiceProber:
             self.logger.warning(f"Unexpected error when probing {ip}:{port}: {str(e)}")
             return None
 
-    def probe_https(self, ip, port):
+    def _probe_https(self, ip, port):
         """
         Special handling for HTTPS services with SSL/TLS.
 
@@ -419,7 +419,7 @@ class ServiceProber:
                     if cert and 'subject' in cert:
                         for field in cert['subject']:
                             if field[0][0] == 'organizationName':
-                                cert_info = f" - {self.sanitize_response(field[0][1])}"
+                                cert_info = f" - {self._sanitize_response(field[0][1])}"
                                 break
 
                     # Send HTTP request to get server header
@@ -433,7 +433,7 @@ class ServiceProber:
 
                     match = re.search(r"Server: ([^\r\n]+)", response_str)
                     if match:
-                        server_header = self.sanitize_response(match.group(1).strip())
+                        server_header = self._sanitize_response(match.group(1).strip())
 
                     # Format result with both certificate and server info if available
                     if server_header:
@@ -447,7 +447,7 @@ class ServiceProber:
             # If HTTPS probe fails, return generic HTTPS
             return "HTTPS"
 
-    def detect_udp_service(self, ip, port):
+    def _detect_udp_service(self, ip, port):
         """
         UDP service detection with actual probing.
 

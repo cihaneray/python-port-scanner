@@ -575,7 +575,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             if self.args.version_detection:
                 prober = ServiceProber(timeout=effective_timeout,
                                        intensity=self.args.version_intensity)
-                result = prober.detect_udp_service(ip, port)
+                result = prober._detect_udp_service(ip, port)
                 if result:
                     self.service_info_cache[cache_key] = result
                     return result

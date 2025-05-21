@@ -31,6 +31,7 @@ class PortScanner:
         self.open_tcp_ports: Dict[str, List[int]] = {}
         self.open_udp_ports: Dict[str, List[int]] = {}  # Track UDP ports separately
         self.lock = threading.Lock()
+        self.cache_lock = threading.Lock()
         self.total_ports = 0
         self.scanned_ports = 0
         self.start_time = 0
@@ -98,7 +99,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
     def _parse_arguments() -> Namespace:
         parser = ArgumentParser(description='Advanced Port Scanner with IPv6 Support')
         parser.add_argument('hosts', help='Host(s) to scan (can be hostname, IPv4, IPv6, or CIDR notation)')
-        parser.add_argument('ports', help='Port range to scan, formatted as start-end or "-" for all ports')
+        parser.add_argument('ports', help = 'Port range to scan: start-end, comma-separated list (e.g. "80,443"), or "-" for all ports')
         parser.add_argument('-t', '--threads', type=int, default=50, help='Number of threads to use (default: 50)')
         parser.add_argument('-T', '--timeout', type=float, default=0.5, help='Timeout in seconds (default: 0.5)')
         parser.add_argument('-o', '--output', help='Output file for results')
@@ -431,6 +432,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                 self._save_json_results(targets)
             else:
                 self._save_results(targets)
+        self.last_scan_time = time.time()
 
     def _apply_rate_limit(self):
         """Apply rate limiting if enabled."""
@@ -565,8 +567,9 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
         # Check cache first to avoid redundant probes
         cache_key = f"{ip}:{port}:{protocol}"
-        if cache_key in self.service_info_cache:
-            return self.service_info_cache[cache_key]
+        with self.cache_lock:
+            if cache_key in self.service_info_cache:
+                return self.service_info_cache[cache_key]
 
         # Standardize timeout handling
         effective_timeout = max(2.0, self.args.timeout)
@@ -577,7 +580,8 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                                        intensity=self.args.version_intensity)
                 result = prober._detect_udp_service(ip, port)
                 if result:
-                    self.service_info_cache[cache_key] = result
+                    with self.cache_lock:
+                        self.service_info_cache[cache_key] = result
                     return result
             return ""
 
@@ -695,7 +699,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
     def _print_progress(self) -> None:
         """Display scan progress."""
-        while not self.queue.empty():
+        while self.scanned_ports < self.total_ports:
             with self.lock:
                 progress = (self.scanned_ports / self.total_ports) * 100
                 elapsed = time.time() - self.start_time
@@ -939,7 +943,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
                     "ip": target,
                     "ip_type": "ipv6" if ':' in target else "ipv4",
                     "tcp_ports": [],
-                    "udp_ports": [] if self.args.udp else None
+                    **({"udp_ports": []} if self.args.udp else {})
                 }
 
                 if self.args.os_detection and (target in self.os_results):

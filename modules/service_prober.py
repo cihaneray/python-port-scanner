@@ -6,6 +6,7 @@ import ssl
 import logging
 import threading
 from html import escape
+from typing import Optional
 
 
 class ServiceProber:
@@ -133,18 +134,9 @@ class ServiceProber:
         }
 
     def _get_protocol_for_port(self, port):
-        """
-        Determine likely protocol based on port number.
-
-        Args:
-            port (int): Port number to check
-
-        Returns:
-            str: Protocol name or 'default' if unknown
-        """
         return self.port_to_protocol.get(port, 'default')
 
-    def detect_service_version(self, ip, port, protocol='tcp'):
+    def detect_service_version(self, ip: str, port: int, protocol: str = 'tcp') -> Optional[str]:
         """
         Detect service version by sending appropriate probes.
 
@@ -166,12 +158,11 @@ class ServiceProber:
         try:
             if protocol == 'udp':
                 # UDP service detection needs actual probing
-                result = self._detect_udp_service(ip, port)
-                if result:
-                    with self.cache_lock:
-                        self.service_cache[cache_key] = result
-                    return result
-                return None
+                result = self.detect_udp_service(ip, port)
+                if not result: return None
+                with self.cache_lock:
+                    self.service_cache[cache_key] = result
+                return result
 
             # For TCP, we'll use our probe data
             service_protocol = self._get_protocol_for_port(port)
@@ -179,11 +170,10 @@ class ServiceProber:
             # Special handling for HTTPS
             if service_protocol == 'https':
                 result = self._probe_https(ip, port)
-                if result:
-                    with self.cache_lock:
-                        self.service_cache[cache_key] = result
-                    return result
-                return None
+                if not result: return None
+                with self.cache_lock:
+                    self.service_cache[cache_key] = result
+                return result
 
             # Get applicable probes based on intensity
             probe_count = max(1, min(len(self.probes.get(service_protocol, [])), self.intensity))
@@ -206,12 +196,11 @@ class ServiceProber:
                     except socket.error as e:
                         self.logger.debug(f"Connection to {ip}:{port} failed: {str(e)}")
                         # Check if port closes immediately (connection refused)
-                        if "refused" in str(e).lower():
-                            with self.cache_lock:
-                                self.service_cache[
-                                    cache_key] = f"Port {port} accepts connections but closes immediately"
-                            return self.service_cache[cache_key]
-                        return None
+                        if "refused" not in str(e).lower(): return None
+                        with self.cache_lock:
+                            self.service_cache[
+                                cache_key] = f"Port {port} accepts connections but closes immediately"
+                        return self.service_cache[cache_key]
 
                     # Try each probe with the same connection if possible
                     for i, (probe_data, response_pattern, regex_pattern) in enumerate(active_probes):
@@ -296,15 +285,7 @@ class ServiceProber:
             return None
 
     def _sanitize_response(self, response_text):
-        """
-        Sanitize service response to prevent injection issues.
-
-        Args:
-            response_text (str): Raw response text
-
-        Returns:
-            str: Sanitized response
-        """
+        """ Sanitize service response to prevent injection issues. """
         if not response_text:
             return ""
 
@@ -313,24 +294,10 @@ class ServiceProber:
 
         # HTML escape to prevent XSS if displayed in web interfaces
         sanitized = escape(sanitized)
-
-        # Truncate to maximum length
         return sanitized[:self.banner_max_length]
 
     def _send_probe(self, ip, port, probe_data, response_pattern, regex_pattern):
-        """
-        Send a probe to the service and analyze the response.
-
-        Args:
-            ip (str): Target IP address
-            port (int): Target port number
-            probe_data (bytes): Data to send
-            response_pattern (bytes): Pattern to look for in response
-            regex_pattern (str): Regex to extract version info
-
-        Returns:
-            str: Service version info or None if not detected
-        """
+        """ Send a probe to the service and analyze the response. """
         try:
             # Determine if IPv4 or IPv6 address
             socket_family = socket.AF_INET6 if ':' in ip else socket.AF_INET
@@ -388,16 +355,7 @@ class ServiceProber:
             return None
 
     def _probe_https(self, ip, port):
-        """
-        Special handling for HTTPS services with SSL/TLS.
-
-        Args:
-            ip (str): Target IP address
-            port (int): Target port number
-
-        Returns:
-            str: HTTPS service info or None if detection failed
-        """
+        """ Special handling for HTTPS services with SSL/TLS. """
         try:
             # Enhanced TLS context configuration
             context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -447,18 +405,8 @@ class ServiceProber:
             # If HTTPS probe fails, return generic HTTPS
             return "HTTPS"
 
-    def _detect_udp_service(self, ip, port):
-        """
-        UDP service detection with actual probing.
-
-        Args:
-            ip (str): Target IP address
-            port (int): Target port number
-
-        Returns:
-            str: UDP service info or None if detection failed
-        """
-        # UDP service mappings for common ports
+    def detect_udp_service(self, ip, port):
+        """ UDP service detection with actual probing. """
         udp_services = {
             53: ("DNS",
                  b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07\x76\x65\x72\x73\x69\x6f\x6e\x04\x62\x69\x6e\x64\x00\x00\x10\x00\x03"),

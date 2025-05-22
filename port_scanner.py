@@ -10,9 +10,10 @@ import threading
 import time
 import re
 
+from dataclasses import dataclass
 from argparse import ArgumentParser, Namespace
 from queue import Queue, Empty
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from modules.service_prober import ServiceProber
 
 # For SYN and UDP scanning
@@ -23,6 +24,21 @@ try:
     SCAPY_AVAILABLE = True
 except ImportError:
     pass
+
+
+@dataclass
+class ScanResult:
+    scan_type: str
+    scan_date: str
+    hosts_scanned: int
+    ports_scanned: int
+    total_open: int
+    targets: dict
+
+    def __repr__(self):
+        return str({'scan_info':
+                        {'scan_type': self.scan_type, 'scan_date': self.scan_date, 'hosts_scanned': self.hosts_scanned,
+                         'ports_scanned': self.ports_scanned, 'total_open': self.total_open}, 'targets': self.targets})
 
 
 class PortScanner:
@@ -80,18 +96,17 @@ class PortScanner:
         self._scan()
 
     def _print_banner(self) -> None:
-        """Print ASCII art banner for the tool."""
-        if self.args.quiet:
-            return
+        if self.args.quiet: return
         banner = """
-C8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DCbC8888DC8
-dD|                     d8888b. .d8888.  .o88b.  .d8b.  d8b   db                     |Cb
-d8|                     88  `8D 88'  YP d8P  Y8 d8   8b 888o  88                     |8b
-d8|                     88oodD' `8bo.   8P      88   88 88V8o 88                     |8b
-d8|                     88        `Y8b. 8b      88ooo88 88 V8o88                     |8b
-d8|                     88      db   8D Y8b  d8 88   88 88  V888                     |8b
-d8|                     88      `8888Y'  `Y88P' YP   YP VP   V8P                     |8D
-C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888D
+        
+░▒▓███████▓▒░░▒▓██████████████▓▒░ ░▒▓██████▓▒░░▒▓███████▓▒░  
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░ 
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░ 
+░▒▓███████▓▒░░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓████████▓▒░▒▓███████▓▒░  
+░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░        
+░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░        
+░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░        
+                                                             
 """
         print(banner)
 
@@ -99,7 +114,8 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
     def _parse_arguments() -> Namespace:
         parser = ArgumentParser(description='Advanced Port Scanner with IPv6 Support')
         parser.add_argument('hosts', help='Host(s) to scan (can be hostname, IPv4, IPv6, or CIDR notation)')
-        parser.add_argument('ports', help = 'Port range to scan: start-end, comma-separated list (e.g. "80,443"), or "-" for all ports')
+        parser.add_argument('ports',
+                            help='Port range to scan: start-end, comma-separated list (e.g. "80,443"), or "-" for all ports')
         parser.add_argument('-t', '--threads', type=int, default=50, help='Number of threads to use (default: 50)')
         parser.add_argument('-T', '--timeout', type=float, default=0.5, help='Timeout in seconds (default: 0.5)')
         parser.add_argument('-o', '--output', help='Output file for results')
@@ -125,18 +141,16 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
     @staticmethod
     def _is_root() -> bool:
-        """Check if the script is running with root/admin privileges."""
-        if os.name == 'nt':  # Windows
-            try:
-                import ctypes
-                return ctypes.windll.shell32.IsUserAnAdmin() != 0
-            except Exception:
-                return False
-        else:  # Unix/Linux/Mac
+        if os.name != 'nt':  # Not windows
             return os.geteuid() == 0
 
+        try:  # Windows
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            return False
+
     def _is_scan_available(self, scan_type: str) -> None:
-        """Check if the script is running with root/admin privileges and is SCAPY available."""
         if not self._is_root():
             print(
                 f"Error: {scan_type + ' scanning' if scan_type in ['SYN', 'UDP'] else scan_type} requires root/administrator privileges")
@@ -148,46 +162,32 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             sys.exit(1)
 
     def _load_port_config(self) -> Dict[int, str]:
-        """Load port configuration from file or use default."""
-        if self.args.config:
-            config_path = self.args.config
-        else:
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'port_config.json')
-
+        config_path = self.args.config if self.args.config else os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                             'port_config.json')
         try:
             if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                # Convert keys to integers
+                with open(config_path, 'r') as f: config = json.load(f)
                 return {int(k): v for k, v in config['common_ports'].items()}
-            else:
-                # Return default configuration if file doesn't exist
-                return self._get_default_ports()
+            return self._get_default_ports()
         except (json.JSONDecodeError, KeyError, IOError) as e:
             print(f"Warning: Could not load port configuration: {e}")
             return self._get_default_ports()
 
     @staticmethod
     def _get_default_ports() -> Dict[int, str]:
-        """Return default common ports dictionary."""
         return {
-            20: "FTP-DATA", 21: "FTP", 22: "SSH", 23: "TELNET", 25: "SMTP",
-            53: "DNS", 80: "HTTP", 443: "HTTPS", 110: "POP3", 143: "IMAP",
-            389: "LDAP", 445: "SMB", 1433: "MSSQL", 1521: "Oracle DB",
-            3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 5900: "VNC",
-            6379: "Redis", 8080: "HTTP-ALT", 8443: "HTTPS-ALT", 27017: "MongoDB",
+            20: "FTP-DATA", 21: "FTP", 22: "SSH", 23: "TELNET", 25: "SMTP", 53: "DNS", 80: "HTTP", 443: "HTTPS",
+            110: "POP3", 143: "IMAP", 389: "LDAP", 445: "SMB", 1433: "MSSQL", 1521: "Oracle DB", 3306: "MySQL",
+            3389: "RDP", 5432: "PostgreSQL", 5900: "VNC", 6379: "Redis", 8080: "HTTP-ALT", 8443: "HTTPS-ALT",
+            27017: "MongoDB",
             # Common UDP ports
-            67: "DHCP", 68: "DHCP", 69: "TFTP", 123: "NTP",
-            137: "NetBIOS-NS", 138: "NetBIOS-DGM", 161: "SNMP", 162: "SNMP-TRAP",
-            500: "IKE", 514: "Syslog", 520: "RIP", 1194: "OpenVPN", 1900: "SSDP",
-            5353: "mDNS", 27015: "Steam", 44818: "EtherNet/IP"
+            67: "DHCP", 68: "DHCP", 69: "TFTP", 123: "NTP", 137: "NetBIOS-NS", 138: "NetBIOS-DGM", 161: "SNMP",
+            162: "SNMP-TRAP", 500: "IKE", 514: "Syslog", 520: "RIP", 1194: "OpenVPN", 1900: "SSDP", 5353: "mDNS",
+            27015: "Steam", 44818: "EtherNet/IP"
         }
 
     def _create_default_config(self, config_path: str) -> None:
-        """Create default configuration file."""
-        default_config = {
-            "common_ports": {str(k): v for k, v in self._get_default_ports().items()}
-        }
+        default_config = {"common_ports": {str(k): v for k, v in self._get_default_ports().items()}}
 
         try:
             with open(config_path, 'w') as f:
@@ -198,22 +198,14 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
     @staticmethod
     def _parse_cidr(cidr: str) -> List[str]:
-        """Parse CIDR notation and return list of IPs (supports both IPv4 and IPv6)."""
         try:
-            # Check if this is IPv4 or IPv6 CIDR notation
             if ':' in cidr:  # IPv6
                 return [str(ip) for ip in ipaddress.IPv6Network(cidr, strict=False)]
-            else:  # IPv4
-                return [str(ip) for ip in ipaddress.IPv4Network(cidr, strict=False)]
+            return [str(ip) for ip in ipaddress.IPv4Network(cidr, strict=False)]
         except ValueError:
-            # If not valid CIDR, treat as single host
             return [cidr]
 
     def _resolve_targets(self, host_input: str) -> List[Tuple[str, bool]]:
-        """
-        Resolve target host(s) from input.
-        Returns a list of tuples (ip_address, is_ipv6)
-        """
         # Check if input is CIDR notation
         if '/' in host_input:
             ips = self._parse_cidr(host_input)
@@ -222,37 +214,36 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         # Otherwise, treat as single hostname/IP
         if self._is_ip(host_input):
             return [(host_input, ':' in host_input)]
-        else:
+        try:
+            # Try to resolve hostname to both IPv4 and IPv6
+            ip_list = []
+
+            # Try IPv4 resolution
             try:
-                # Try to resolve hostname to both IPv4 and IPv6
-                ip_list = []
-
-                # Try IPv4 resolution
-                try:
-                    ipv4 = socket.getaddrinfo(host_input, None, socket.AF_INET)[0][4][0]
-                    ip_list.append((ipv4, False))
-                except socket.gaierror:
-                    pass
-
-                # Try IPv6 resolution
-                try:
-                    ipv6 = socket.getaddrinfo(host_input, None, socket.AF_INET6)[0][4][0]
-                    ip_list.append((ipv6, True))
-                except socket.gaierror:
-                    pass
-
-                # If we have both and not specifically requesting IPv6, prefer IPv4
-                if len(ip_list) == 2 and not self.args.ipv6:
-                    return [ip_list[0]]  # Return only IPv4
-
-                # If no addresses found, raise an error
-                if not ip_list:
-                    raise socket.gaierror(f"Could not resolve hostname {host_input}")
-
-                return ip_list
+                ipv4 = socket.getaddrinfo(host_input, None, socket.AF_INET)[0][4][0]
+                ip_list.append((ipv4, False))
             except socket.gaierror:
-                print(f"Error: Could not resolve hostname {host_input}")
-                sys.exit(1)
+                pass
+
+            # Try IPv6 resolution
+            try:
+                ipv6 = socket.getaddrinfo(host_input, None, socket.AF_INET6)[0][4][0]
+                ip_list.append((ipv6, True))
+            except socket.gaierror:
+                pass
+
+            # If we have both and not specifically requesting IPv6, prefer IPv4
+            if len(ip_list) == 2 and not self.args.ipv6:
+                return [ip_list[0]]  # Return only IPv4
+
+            # If no addresses found, raise an error
+            if not ip_list:
+                raise socket.gaierror(f"Could not resolve hostname {host_input}")
+
+            return ip_list
+        except socket.gaierror:
+            print(f"Error: Could not resolve hostname {host_input}")
+            sys.exit(1)
 
     @staticmethod
     def _is_ip(s: str) -> bool:
@@ -265,10 +256,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
     def _collect_service_banners(self, target: str) -> Dict[str, Dict[int, str]]:
         """Collect service banners for OS fingerprinting."""
-        banners = {
-            "tcp": {},
-            "udp": {}
-        }
+        banners = {"tcp": {}, "udp": {}}
 
         # Collect TCP banners
         for port in self.open_tcp_ports.get(target, []):
@@ -286,22 +274,16 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
     def _perform_os_detection(self, target: str, is_ipv6: bool) -> dict:
         """Perform OS detection on the target."""
+
         from modules.os_fingerprinter import OSFingerprinter
 
-        # Get open ports for this target to improve accuracy
         open_ports = self.open_tcp_ports.get(target, [])
-
-        # Collect service banners for the target
         service_banners = self._collect_service_banners(target)
-
-        # Create fingerprinter with configured timeout
         fingerprinter = OSFingerprinter(timeout=self.args.os_detection_timeout)
 
-        # Perform fingerprinting with banner information
         return fingerprinter.fingerprint_os(target, open_ports, service_banners, is_ipv6)
 
     def _parse_port_range(self) -> tuple:
-        """Parse port range."""
         if self.args.ports == '-':
             start_port, end_port = 1, 65535
             port_list = range(1, 65536)
@@ -329,10 +311,8 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             sys.exit(1)
 
     def _scan(self) -> None:
-        # Parse port range.
         start_port, end_port, port_list = self._parse_port_range()
 
-        # Resolve targets with IPv6 support
         target_tuples = self._resolve_targets(self.args.hosts)
         targets = [ip for ip, _ in target_tuples]
 
@@ -340,7 +320,6 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             print("Error: No valid targets to scan")
             sys.exit(1)
 
-        # Initialize scan variables
         self.total_ports = len(port_list) * len(targets)
         if self.args.udp:
             self.total_ports *= 2  # Double for UDP scan
@@ -401,7 +380,6 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             threads.append(t)
             t.start()
 
-        # Print progress while waiting for scan to complete
         if not self.args.quiet:
             self._print_progress()
 
@@ -454,8 +432,6 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             self.last_scan_time = time.time()
 
     def _tcp_connect_scan(self, target_ip: str, port: int, is_ipv6: bool) -> bool:
-        """Test if a port is open using TCP connect scan."""
-        # Choose the appropriate address family
         addr_family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
 
         with socket.socket(addr_family, socket.SOCK_STREAM) as sock:
@@ -468,44 +444,30 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
         return False
 
     def _syn_scan(self, target_ip: str, port: int, is_ipv6: bool) -> bool:
-        """Perform scanning with SYN (supports both IPv4 and IPv6)."""
-
         # Disable scapy warnings
         conf.verb = 0
-
         # Randomize the source port for stealth scanning
         src_port = random.randint(1025, 65534)
-
         # Choose IPv4 or IPv6 based on target type
-        if is_ipv6:
-            # Create IPv6 SYN packet
-            packet = IPv6(dst=target_ip) / TCP(sport=src_port, dport=port, flags="S")
-        else:
-            # Create IPv4 SYN packet
-            packet = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="S")
-
+        packet = (IPv6(dst=target_ip) if is_ipv6 else IP(dst=target_ip)) / TCP(sport=src_port, dport=port, flags="S")
         # Set timeout and send packet
         response = sr1(packet, timeout=self.args.timeout, verbose=0)
-
         # Check response
-        if response and response.haslayer(TCP):
-            tcp_layer = response.getlayer(TCP)
+        if not (response and response.haslayer(TCP)):
+            return False
+        tcp_layer = response.getlayer(TCP)
 
-            # Check if SYN-ACK (flags=0x12) was received
-            if tcp_layer.flags == 0x12:  # SYN-ACK
-                # Send RST to close connection
-                if is_ipv6:
-                    rst = IPv6(dst=target_ip) / TCP(sport=src_port, dport=port, flags="R")
-                else:
-                    rst = IP(dst=target_ip) / TCP(sport=src_port, dport=port, flags="R")
+        # Check if SYN-ACK (flags=0x12) was received
+        if tcp_layer.flags != 0x12:  # SYN-ACK
+            return False
+        # Send RST to close connection
+        rst = (IPv6(dst=target_ip) if is_ipv6 else IP(dst=target_ip)) / TCP(sport=src_port, dport=port, flags="R")
 
-                sr1(rst, timeout=1, verbose=0)
+        sr1(rst, timeout=1, verbose=0)
 
-                with self.lock:
-                    self.open_tcp_ports[target_ip].append(port)
-                return True
-
-        return False
+        with self.lock:
+            self.open_tcp_ports[target_ip].append(port)
+        return True
 
     def _udp_scan(self, target_ip: str, port: int, is_ipv6: bool) -> bool:
         """ Perform UDP port scanning with retries (supports both IPv4 and IPv6).
@@ -578,7 +540,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             if self.args.version_detection:
                 prober = ServiceProber(timeout=effective_timeout,
                                        intensity=self.args.version_intensity)
-                result = prober._detect_udp_service(ip, port)
+                result = prober.detect_udp_service(ip, port)
                 if result:
                     with self.cache_lock:
                         self.service_info_cache[cache_key] = result
@@ -914,23 +876,15 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
             print(f"Error saving results: {e}")
 
     def _save_json_results(self, targets: List[str]) -> None:
-        """Save scan results to a JSON file with version detection."""
         try:
             # Determine scan types used
             scan_type_str = self._determine_scan_types()
 
-            results = {
-                "scan_info": {
-                    "scan_type": scan_type_str,
-                    "scan_date": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "hosts_scanned": len(targets),
-                    "ports_scanned": self.total_ports,
-                    "total_open": sum(len(ports) for ports in self.open_tcp_ports.values()) +
-                                  (sum(len(ports) for ports in self.open_udp_ports.values()) if self.args.udp else 0)
-                },
-                "targets": {
-                }
-            }
+            total_tcp = sum(len(ports) for ports in self.open_tcp_ports.values())
+            total_udp = sum(len(ports) for ports in self.open_udp_ports.values()) if self.args.udp else 0
+            results = ScanResult(scan_type=scan_type_str, scan_date=time.strftime('%Y-%m-%d %H:%M:%S'),
+                                hosts_scanned=len(targets), ports_scanned=self.total_ports,
+                                total_open=total_tcp + total_udp, targets={})
 
             for target in targets:
                 tcp_open_ports = self.open_tcp_ports[target]
@@ -981,7 +935,7 @@ C88DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC8888DC888
 
                         target_data["udp_ports"].append(port_data)
 
-                results["targets"][target] = target_data
+                results.targets[target] = target_data
 
             # Determine output filename
             json_file = self.args.output
